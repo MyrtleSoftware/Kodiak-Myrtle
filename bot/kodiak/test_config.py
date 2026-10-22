@@ -16,6 +16,7 @@ from kodiak.config import (
     MergeMethod,
     MergeTitleStyle,
     Update,
+    UpdateMethod,
 )
 
 
@@ -62,7 +63,11 @@ def test_config_default() -> None:
                         strip_html_comments=True,
                     ),
                 ),
-                update=Update(always=True, require_automerge_label=False),
+                update=Update(
+                    always=True,
+                    require_automerge_label=False,
+                    method=UpdateMethod.rebase,
+                ),
                 approve=Approve(
                     auto_approve_usernames=["dependabot"],
                     auto_approve_labels=["autoapprove"],
@@ -96,7 +101,11 @@ def test_config_default() -> None:
                         strip_html_comments=True,
                     ),
                 ),
-                update=Update(always=True, require_automerge_label=False),
+                update=Update(
+                    always=True,
+                    require_automerge_label=False,
+                    method=UpdateMethod.rebase,
+                ),
                 approve=Approve(
                     auto_approve_usernames=["dependabot"],
                     auto_approve_labels=["autoapprove"],

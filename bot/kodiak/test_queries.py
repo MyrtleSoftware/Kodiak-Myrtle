@@ -13,6 +13,7 @@ from kodiak import app_config as conf
 from kodiak.config import V1, Merge, MergeMethod
 from kodiak.http import Request, Response
 from kodiak.queries import (
+    UPDATE_PR_BRANCH_MUTATION,
     BranchProtectionRule,
     BypassActor,
     CheckConclusionState,
@@ -30,6 +31,7 @@ from kodiak.queries import (
     PRReviewState,
     PullRequest,
     PullRequestAuthor,
+    PullRequestBranchUpdateMethod,
     PullRequestParameters,
     PullRequestState,
     PushAllowance,
@@ -69,6 +71,31 @@ def api_client(mocker: MockFixture, github_installation_id: str) -> Client:
     client = Client(installation_id=github_installation_id, owner="foo", repo="foo")
     mocker.patch.object(client, "send_query")
     return client
+
+
+async def test_update_pull_request_branch(
+    api_client: Client, mocker: MockFixture
+) -> None:
+    """
+    We should send the updatePullRequestBranch mutation with the requested
+    update method.
+    """
+    response = dict(data=dict(updatePullRequestBranch=dict(clientMutationId=None)))
+    send_query = mocker.patch.object(
+        api_client, "send_query", return_value=wrap_future(response)
+    )
+
+    res = await api_client.update_pull_request_branch(
+        pull_request_id="PR_kwDOABCDEF",
+        update_method=PullRequestBranchUpdateMethod.REBASE,
+    )
+    assert res == response
+    assert send_query.call_count == 1
+    assert send_query.call_args.kwargs == dict(
+        query=UPDATE_PR_BRANCH_MUTATION,
+        variables=dict(PRId="PR_kwDOABCDEF", updateMethod="REBASE"),
+        installation_id=api_client.installation_id,
+    )
 
 
 async def test_get_config_for_ref_error(

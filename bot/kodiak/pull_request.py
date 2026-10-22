@@ -9,6 +9,8 @@ import structlog
 from typing_extensions import Protocol
 
 import kodiak.app_config as conf
+from kodiak.assertions import assert_never
+from kodiak.config import UpdateMethod
 from kodiak.errors import (
     ApiCallException,
     GitHubApiInternalServerError,
@@ -17,7 +19,7 @@ from kodiak.errors import (
 )
 from kodiak.evaluation import mergeable
 from kodiak.http import HTTPStatusError as HTTPError
-from kodiak.queries import Client, EventInfoResponse
+from kodiak.queries import Client, EventInfoResponse, PullRequestBranchUpdateMethod
 
 logger = structlog.get_logger()
 
@@ -257,8 +259,18 @@ class PRV2:
                 else:
                     self.log.warning("failed to delete branch", res=res, exc_info=True)
 
-    async def update_branch(self) -> None:
-        self.log.info("update_branch")
+    async def update_branch(self, *, update_method: UpdateMethod) -> None:
+        self.log.info("update_branch", update_method=update_method.value)
+        if update_method is UpdateMethod.merge:
+            await self._update_branch_merge()
+            return
+        if update_method is UpdateMethod.rebase:
+            await self._update_branch_rebase()
+            return
+
+        assert_never(update_method)
+
+    async def _update_branch_merge(self) -> None:
         async with self.client(
             installation_id=self.install, owner=self.owner, repo=self.repo
         ) as api_client:
@@ -273,6 +285,32 @@ class PRV2:
                     http_status_code=res.status_code,
                     response=res.content,
                 ) from e
+
+    async def _update_branch_rebase(self) -> None:
+        """
+        The REST API only supports updating a branch via merge, so we use the
+        GraphQL API to update a branch via rebase.
+        """
+        async with self.client(
+            installation_id=self.install, owner=self.owner, repo=self.repo
+        ) as api_client:
+            res = await api_client.update_pull_request_branch(
+                pull_request_id=self.event.pull_request.id,
+                update_method=PullRequestBranchUpdateMethod.REBASE,
+            )
+            errors = res.get("errors") if res is not None else None
+            if res is None or errors:
+                self.log.warning(
+                    "failed to update branch via rebase", res=res, errors=errors
+                )
+                # we raise an exception to retry this request.
+                raise ApiCallException(
+                    method="pull_request/update_branch",
+                    # the GraphQL API returns errors with an HTTP 200 status
+                    # code, so we don't have a meaningful status code to report.
+                    http_status_code=0,
+                    response=json.dumps(errors).encode() if errors else b"",
+                )
 
     async def approve_pull_request(self) -> None:
         self.log.info("approve_pull_request")

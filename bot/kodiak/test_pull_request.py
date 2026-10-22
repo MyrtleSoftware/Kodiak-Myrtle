@@ -16,7 +16,7 @@ import pytest
 from typing_extensions import Protocol
 
 import kodiak.http as requests
-from kodiak.config import V1, Merge, MergeMethod
+from kodiak.config import V1, Merge, MergeMethod, UpdateMethod
 from kodiak.errors import ApiCallException
 from kodiak.http import Request
 from kodiak.pull_request import PRV2, EventInfoResponse, QueueForMergeCallback
@@ -28,6 +28,7 @@ from kodiak.queries import (
     NodeListPushAllowance,
     PullRequest,
     PullRequestAuthor,
+    PullRequestBranchUpdateMethod,
     PullRequestState,
     RepoInfo,
     ReviewThreadConnection,
@@ -181,6 +182,18 @@ class MockEnqueuePullRequest(BaseMockFunc):
         return self.response
 
 
+class MockUpdatePullRequestBranch(BaseMockFunc):
+    response: Optional[Dict[str, Any]]
+
+    async def __call__(
+        self, *, pull_request_id: str, update_method: PullRequestBranchUpdateMethod
+    ) -> Optional[Dict[str, Any]]:
+        self.log_call(
+            dict(pull_request_id=pull_request_id, update_method=update_method)
+        )
+        return self.response
+
+
 class MockUpdateRef(BaseMockFunc):
     response: requests.Response
 
@@ -195,6 +208,7 @@ class FakeClientProtocol(Protocol):
     delete_label: MockDeleteLabel
     add_label: MockAddLabel
     update_branch: MockUpdateBranch
+    update_pull_request_branch: MockUpdatePullRequestBranch
     update_ref: MockUpdateRef
 
     def __init__(self, *args: object, **kwargs: object) -> None: ...
@@ -213,6 +227,7 @@ def create_client() -> Type[FakeClientProtocol]:
         delete_label = MockDeleteLabel()
         add_label = MockAddLabel()
         update_branch = MockUpdateBranch()
+        update_pull_request_branch = MockUpdatePullRequestBranch()
         update_ref = MockUpdateRef()
 
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -376,9 +391,10 @@ async def test_pr_v2_update_branch_ok() -> None:
     client = create_client()
     client.update_branch.response = create_response(content=b"", status_code=204)
     pr_v2 = create_prv2(client=client)
-    await pr_v2.update_branch()
+    await pr_v2.update_branch(update_method=UpdateMethod.merge)
     assert client.update_branch.call_count == 1
     assert client.update_branch.calls[0]["pull_number"] == pr_v2.number
+    assert client.update_pull_request_branch.called is False
 
 
 async def test_pr_v2_update_branch_service_unavailable() -> None:
@@ -391,12 +407,65 @@ async def test_pr_v2_update_branch_service_unavailable() -> None:
     )
     pr_v2 = create_prv2(client=client)
     with pytest.raises(ApiCallException) as e:
-        await pr_v2.update_branch()
+        await pr_v2.update_branch(update_method=UpdateMethod.merge)
     assert client.update_branch.call_count == 1
     assert client.update_branch.calls[0]["pull_number"] == pr_v2.number
     assert e.value.method == "pull_request/update_branch"
     assert e.value.status_code == 503
     assert b"Service Unavailable" in e.value.response
+
+
+async def test_pr_v2_update_branch_rebase_ok() -> None:
+    """
+    We should update a branch via the GraphQL API when the rebase update
+    method is configured.
+    """
+    client = create_client()
+    client.update_pull_request_branch.response = {
+        "data": {"updatePullRequestBranch": {"clientMutationId": None}}
+    }
+    pr_v2 = create_prv2(client=client)
+    await pr_v2.update_branch(update_method=UpdateMethod.rebase)
+    assert client.update_branch.called is False
+    assert client.update_pull_request_branch.call_count == 1
+    assert client.update_pull_request_branch.calls[0] == dict(
+        pull_request_id=pr_v2.event.pull_request.id,
+        update_method=PullRequestBranchUpdateMethod.REBASE,
+    )
+
+
+async def test_pr_v2_update_branch_rebase_graphql_error() -> None:
+    """
+    We should raise ApiCallException when the GraphQL API returns errors for a
+    rebase update.
+    """
+    client = create_client()
+    client.update_pull_request_branch.response = {
+        "data": None,
+        "errors": [{"message": "Pull request is not behind the base branch"}],
+    }
+    pr_v2 = create_prv2(client=client)
+    with pytest.raises(ApiCallException) as e:
+        await pr_v2.update_branch(update_method=UpdateMethod.rebase)
+    assert client.update_branch.called is False
+    assert client.update_pull_request_branch.call_count == 1
+    assert e.value.method == "pull_request/update_branch"
+    assert b"not behind the base branch" in e.value.response
+
+
+async def test_pr_v2_update_branch_rebase_request_error() -> None:
+    """
+    We should raise ApiCallException when we fail to reach the GitHub API for a
+    rebase update.
+    """
+    client = create_client()
+    client.update_pull_request_branch.response = None
+    pr_v2 = create_prv2(client=client)
+    with pytest.raises(ApiCallException) as e:
+        await pr_v2.update_branch(update_method=UpdateMethod.rebase)
+    assert client.update_branch.called is False
+    assert client.update_pull_request_branch.call_count == 1
+    assert e.value.method == "pull_request/update_branch"
 
 
 async def test_pr_v2_add_label_ok() -> None:

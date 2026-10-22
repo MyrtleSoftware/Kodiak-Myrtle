@@ -498,6 +498,30 @@ update.ignored_usernames = ["bernard-lowe", "dependabot-preview"]
 
 > **NOTE:** `update.ignored_usernames` is a new name for `update.blacklist_usernames`. Both options behave identically.
 
+### `update.method`
+
+- **type:** `string`
+- **default:** `"merge"`
+- **options:** `"merge"`, `"rebase"`
+
+Choose how Kodiak updates a pull request that is out of date with its base branch.
+
+With `"merge"`, Kodiak merges the base branch into the pull request branch. This creates a merge commit on the pull request branch.
+
+With `"rebase"`, Kodiak rebases the pull request commits on top of the base branch. This keeps a linear history without a merge commit, but GitHub rewrites the pull request commits, so their commit hashes change.
+
+This option applies to all branch updates made by Kodiak, including updates made before a merge and updates triggered by `update.always` or `update.autoupdate_label`.
+
+#### example
+
+```toml
+version = 1
+
+[update]
+always = true
+method = "rebase"
+```
+
 ### `approve.auto_approve_usernames`
 
 - **type:** `string[]`
@@ -723,6 +747,12 @@ always = false # default: false
 # (configured via `merge.automerge_label`). When disable, Kodiak will update any
 # PR. This option only applies when `update.always = true`.
 require_automerge_label = true # default: true
+
+# Choose how Kodiak updates a PR that is out of date with its base branch.
+# "merge" merges the base branch into the PR branch, creating a merge commit.
+# "rebase" rebases the PR commits on top of the base branch, which rewrites the
+# PR commits.
+method = "merge" # default: "merge", options: "merge", "rebase"
 
 [approve]
 
