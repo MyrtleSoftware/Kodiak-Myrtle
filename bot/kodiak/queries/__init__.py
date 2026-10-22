@@ -499,6 +499,25 @@ mutation enqueue($PRId: ID!, $SHA: GitObjectID!) {
 """
 
 
+class PullRequestBranchUpdateMethod(Enum):
+    """
+    https://docs.github.com/en/graphql/reference/enums#pullrequestbranchupdatemethod
+    """
+
+    MERGE = "MERGE"
+    REBASE = "REBASE"
+
+
+UPDATE_PR_BRANCH_MUTATION = """
+mutation updateBranch($PRId: ID!, $updateMethod: PullRequestBranchUpdateMethod!) {
+  updatePullRequestBranch(input: {pullRequestId: $PRId, updateMethod: $updateMethod}) {
+    clientMutationId
+  }
+}
+
+"""
+
+
 class PushAllowanceActor(BaseModel):
     """
     https://developer.github.com/v4/object/app/
@@ -1400,6 +1419,23 @@ query {
         return await self.send_query(
             query=ENQUEUE_PR_MUTATION,
             variables=dict(PRId=pull_request_id, SHA=expected_head_oid),
+            installation_id=self.installation_id,
+        )
+
+    async def update_pull_request_branch(
+        self, *, pull_request_id: str, update_method: PullRequestBranchUpdateMethod
+    ) -> Optional[GraphQLResponse]:
+        """
+        Update a pull request branch with its base branch via merge or rebase.
+
+        The REST API endpoint for updating a pull request branch only supports
+        merge updates, so we use this mutation for rebase updates.
+
+        https://docs.github.com/en/graphql/reference/mutations#updatepullrequestbranch
+        """
+        return await self.send_query(
+            query=UPDATE_PR_BRANCH_MUTATION,
+            variables=dict(PRId=pull_request_id, updateMethod=update_method.value),
             installation_id=self.installation_id,
         )
 

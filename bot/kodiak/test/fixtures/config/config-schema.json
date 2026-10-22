@@ -62,7 +62,8 @@
         "require_automerge_label": true,
         "autoupdate_label": null,
         "blacklist_usernames": [],
-        "ignored_usernames": []
+        "ignored_usernames": [],
+        "method": "merge"
       },
       "allOf": [
         {
@@ -372,6 +373,15 @@
         }
       }
     },
+    "UpdateMethod": {
+      "title": "UpdateMethod",
+      "description": "An enumeration.",
+      "enum": [
+        "merge",
+        "rebase"
+      ],
+      "type": "string"
+    },
     "Update": {
       "title": "Update",
       "type": "object",
@@ -405,6 +415,14 @@
           "items": {
             "type": "string"
           }
+        },
+        "method": {
+          "default": "merge",
+          "allOf": [
+            {
+              "$ref": "#/definitions/UpdateMethod"
+            }
+          ]
         }
       }
     },

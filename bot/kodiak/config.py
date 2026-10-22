@@ -15,6 +15,11 @@ class MergeMethod(str, Enum):
     rebase_fast_forward = "rebase_fast_forward"
 
 
+class UpdateMethod(str, Enum):
+    merge = "merge"
+    rebase = "rebase"
+
+
 class MergeTitleStyle(Enum):
     github_default = "github_default"
     pull_request_title = "pull_request_title"
@@ -131,6 +136,10 @@ class Update(BaseModel):
     # Do not update PRs created by a listed user.
     blacklist_usernames: List[str] = []  # deprecated for ignored_usernames
     ignored_usernames: List[str] = []
+    # method to update a PR with its base branch. "merge" merges the base
+    # branch into the PR branch, creating a merge commit. "rebase" rebases the
+    # PR commits on top of the base branch, which rewrites the PR commits.
+    method: UpdateMethod = UpdateMethod.merge
 
 
 class Approve(BaseModel):

@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the `update.method` configuration option. Set `update.method = "rebase"` to have Kodiak update out of date pull requests with a rebase instead of a merge commit.
 - Added support for GitHub's merge queue. When a merge queue is required for the base branch, Kodiak adds the pull request to the merge queue instead of merging it. (#927)
 
 ### Fixed

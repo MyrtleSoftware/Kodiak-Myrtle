@@ -7,7 +7,7 @@ import pytest
 from toml import TomlDecodeError
 from typing_extensions import Protocol
 
-from kodiak.config import V1, MergeMethod
+from kodiak.config import V1, MergeMethod, UpdateMethod
 from kodiak.errors import GitHubApiInternalServerError, PollForever
 from kodiak.evaluation import (
     PRAPI,
@@ -160,8 +160,8 @@ class MockQueueForMerge(BaseMockFunc):
 
 
 class MockUpdateBranch(BaseMockFunc):
-    async def __call__(self) -> None:
-        self.log_call(dict())
+    async def __call__(self, *, update_method: UpdateMethod) -> None:
+        self.log_call(dict(update_method=update_method))
 
 
 class MockApprovePullRequest(BaseMockFunc):
@@ -1913,6 +1913,69 @@ async def test_mergeable_do_not_merge_with_update_branch_immediately_need_update
     assert api.set_status.called is True
     assert "updating branch" in api.set_status.calls[0]["msg"]
     assert api.queue_for_merge.called is False
+    assert api.merge.called is False
+
+
+async def test_mergeable_update_branch_default_method() -> None:
+    """
+    By default, Kodiak should update a branch via merge.
+    """
+    mergeable = create_mergeable()
+    api = create_api()
+    pull_request = create_pull_request()
+    config = create_config()
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+    config.update.always = True
+    await mergeable(api=api, config=config, pull_request=pull_request)
+
+    assert api.set_status.call_count == 1
+    assert "updating branch" in api.set_status.calls[0]["msg"]
+    assert api.update_branch.call_count == 1
+    assert api.update_branch.calls[0]["update_method"] == UpdateMethod.merge
+    assert api.queue_for_merge.called is False
+    assert api.merge.called is False
+
+
+async def test_mergeable_update_branch_rebase_method() -> None:
+    """
+    When `update.method = "rebase"` is configured, Kodiak should update a
+    branch via rebase.
+    """
+    mergeable = create_mergeable()
+    api = create_api()
+    pull_request = create_pull_request()
+    config = create_config()
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+    config.update.always = True
+    config.update.method = UpdateMethod.rebase
+    await mergeable(api=api, config=config, pull_request=pull_request)
+
+    assert api.set_status.call_count == 1
+    assert "updating branch" in api.set_status.calls[0]["msg"]
+    assert api.update_branch.call_count == 1
+    assert api.update_branch.calls[0]["update_method"] == UpdateMethod.rebase
+    assert api.queue_for_merge.called is False
+    assert api.merge.called is False
+
+
+async def test_mergeable_update_branch_rebase_method_while_merging() -> None:
+    """
+    The configured update method should also be used when Kodiak updates a
+    branch during the merge process.
+    """
+    mergeable = create_mergeable()
+    api = create_api()
+    pull_request = create_pull_request()
+    config = create_config()
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+    config.update.method = UpdateMethod.rebase
+    with pytest.raises(PollForever):
+        await mergeable(api=api, config=config, pull_request=pull_request, merging=True)
+
+    assert api.set_status.call_count == 1
+    assert "updating branch" in api.set_status.calls[0]["msg"]
+    assert api.update_branch.call_count == 1
+    assert api.update_branch.calls[0]["update_method"] == UpdateMethod.rebase
     assert api.merge.called is False
 
 
