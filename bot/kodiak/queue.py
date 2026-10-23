@@ -333,7 +333,7 @@ async def process_webhook_event(
         return await webhook_queue.enqueue_for_repo(event=webhook_event, first=first)
 
     log.info("evaluate pr for webhook event")
-    await evaluate_pr(
+    pr = await evaluate_pr(
         install=webhook_event.installation_id,
         owner=webhook_event.repo_owner,
         repo=webhook_event.repo_name,
@@ -345,6 +345,21 @@ async def process_webhook_event(
         is_active_merging=is_active_merging,
         log=log,
     )
+
+    # The repo worker keeps `merge.head_of_queue_label` on the PR it is
+    # merging. A PR that carries the label without being that PR has a stale
+    # one, e.g. from a worker that died part way through a merge: take it
+    # off. Decide now, after the fetch, not from `is_active_merging` above:
+    # the worker sets its target marker before adding the label and clears
+    # it after removing the label, so a PR fetched with the label and found
+    # without the marker is never the active merge.
+    if pr is not None:
+        is_active_now = (
+            await redis_bot.get(webhook_event.get_merge_target_queue_name())
+            == webhook_event.json().encode()
+        )
+        if not is_active_now:
+            await pr.set_head_of_queue_label(present=False)
 
 
 async def webhook_event_consumer(
