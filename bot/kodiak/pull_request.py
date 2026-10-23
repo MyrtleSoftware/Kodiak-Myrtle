@@ -19,7 +19,12 @@ from kodiak.errors import (
 )
 from kodiak.evaluation import mergeable
 from kodiak.http import HTTPStatusError as HTTPError
-from kodiak.queries import Client, EventInfoResponse, PullRequestBranchUpdateMethod
+from kodiak.queries import (
+    Client,
+    EventInfoResponse,
+    PullRequestBranchUpdateMethod,
+    PullRequestState,
+)
 
 logger = structlog.get_logger()
 
@@ -460,6 +465,12 @@ class PRV2:
             return
         label = config.merge.head_of_queue_label
         if label is None:
+            return
+        if present and self.event.pull_request.state != PullRequestState.OPEN:
+            # A merged or closed pull request is never the head of the queue.
+            # The merge queue does take one again after its merge: webhook
+            # evaluations during the merge re-enqueue it, and that second pass
+            # only dequeues it. No label for that.
             return
         has_label = label in self.event.pull_request.labels
         try:

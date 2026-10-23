@@ -5,6 +5,7 @@ import structlog
 from pytest_mock import MockFixture
 
 from kodiak.queue import (
+    MERGE_QUEUE_NAMES,
     RedisWebhookQueue,
     WebhookEvent,
     installation_id_from_queue,
@@ -126,4 +127,103 @@ async def test_process_webhook_event_head_of_queue_label(
 
     assert calls == ([] if active else [False])
     await redis.delete(target_name)
+    await redis.connection_pool.disconnect()
+
+
+def make_event(number: int) -> WebhookEvent:
+    return WebhookEvent(
+        repo_owner="acme",
+        repo_name="widgets",
+        pull_request_number=number,
+        installation_id="4321",
+        target_name="main",
+    )
+
+
+@requires_redis
+async def test_enqueue_for_repo_skips_the_pr_being_merged(mocker: MockFixture) -> None:
+    """
+    Webhook events during a merge must not put the PR being merged back into
+    the merge queue, or it is processed a second time after the merge.
+    """
+    redis = create_connection()
+    mocker.patch("kodiak.queue.redis_bot", redis)
+    mocker.patch.object(RedisWebhookQueue, "start_repo_worker")
+    event = make_event(9)
+    queue_name = event.get_merge_queue_name()
+    target_name = event.get_merge_target_queue_name()
+    await redis.delete(queue_name, target_name)
+    queue = RedisWebhookQueue()
+
+    await redis.set(target_name, event.json())
+    assert await queue.enqueue_for_repo(event=event, first=False) == 0
+    assert await redis.zscore(queue_name, event.json()) is None, "not re-enqueued"
+
+    await redis.delete(target_name)
+    assert await queue.enqueue_for_repo(event=event, first=False) == 0
+    assert await redis.zscore(queue_name, event.json()) is not None, "enqueued"
+
+    await redis.delete(queue_name)
+    await redis.connection_pool.disconnect()
+
+
+@requires_redis
+async def test_process_repo_queue_clears_marker_and_label_on_error(
+    mocker: MockFixture,
+) -> None:
+    """
+    If the merging evaluation raises, the marker and the label still go.
+    """
+    redis = create_connection()
+    mocker.patch("kodiak.queue.redis_bot", redis)
+    event = make_event(10)
+    queue_name = event.get_merge_queue_name()
+    target_name = event.get_merge_target_queue_name()
+    await redis.delete(queue_name, target_name, target_name + ":time")
+    await redis.zadd(queue_name, {event.json(): 1.0})
+
+    calls: List[object] = []
+
+    class FakePR:
+        async def set_head_of_queue_label(self, *, present: bool) -> None:
+            calls.append(present)
+
+    async def fake_get_pr(**kwargs: object) -> FakePR:
+        return FakePR()
+
+    async def fake_evaluate_pr(**kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    mocker.patch("kodiak.queue.get_pr", fake_get_pr)
+    mocker.patch("kodiak.queue.evaluate_pr", fake_evaluate_pr)
+
+    with pytest.raises(RuntimeError):
+        await process_repo_queue(structlog.get_logger(), queue_name)
+
+    assert calls == [True, False]
+    assert await redis.get(target_name) is None
+    await redis.connection_pool.disconnect()
+
+
+@requires_redis
+async def test_create_clears_stale_markers(mocker: MockFixture) -> None:
+    """
+    At startup nothing is being merged, so markers left by a crash are removed.
+    """
+    redis = create_connection()
+    mocker.patch("kodiak.queue.redis_bot", redis)
+    mocker.patch.object(RedisWebhookQueue, "start_repo_worker")
+    mocker.patch.object(RedisWebhookQueue, "start_webhook_worker")
+    event = make_event(11)
+    queue_name = event.get_merge_queue_name()
+    target_name = event.get_merge_target_queue_name()
+    await redis.sadd(MERGE_QUEUE_NAMES, queue_name)
+    await redis.set(target_name, event.json())
+    await redis.set(target_name + ":time", "1.0")
+
+    await RedisWebhookQueue().create()
+
+    assert await redis.get(target_name) is None
+    assert await redis.get(target_name + ":time") is None
+    await redis.srem(MERGE_QUEUE_NAMES, queue_name)
     await redis.connection_pool.disconnect()

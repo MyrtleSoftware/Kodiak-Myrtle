@@ -634,3 +634,26 @@ async def test_pr_v2_set_head_of_queue_label_api_error_is_not_fatal() -> None:
     pr_v2 = create_prv2(event=event, client=client)
     await pr_v2.set_head_of_queue_label(present=True)
     assert client.add_label.call_count == 1
+
+
+async def test_pr_v2_set_head_of_queue_label_not_added_to_merged_pr() -> None:
+    """
+    The merge queue processes a pull request once more after merging it;
+    that pass must not label a merged (or closed) pull request. Removal
+    still works, so a label left from the merge comes off.
+    """
+    client = create_client()
+    client.add_label.response = create_response(content=b"", status_code=204)
+    client.delete_label.response = create_response(content=b"", status_code=204)
+    event = create_event()
+    assert isinstance(event.config, V1)
+    event.config.merge.head_of_queue_label = "merge-queue-head"
+    event.pull_request.state = PullRequestState.MERGED
+    event.pull_request.labels = []
+    pr_v2 = create_prv2(event=event, client=client)
+    await pr_v2.set_head_of_queue_label(present=True)
+    assert client.add_label.call_count == 0
+
+    event.pull_request.labels = ["merge-queue-head"]
+    await pr_v2.set_head_of_queue_label(present=False)
+    assert client.delete_label.call_count == 1

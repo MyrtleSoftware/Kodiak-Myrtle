@@ -441,24 +441,30 @@ async def process_repo_queue(log: structlog.BoundLogger, queue_name: str) -> Non
             return
         await pr.set_head_of_queue_label(present=present)
 
-    await set_head_of_queue_label(present=True)
-    log.info("evaluate PR for merging")
-    await evaluate_pr(
-        install=webhook_event.installation_id,
-        owner=webhook_event.repo_owner,
-        repo=webhook_event.repo_name,
-        number=webhook_event.pull_request_number,
-        dequeue_callback=dequeue,
-        requeue_callback=requeue,
-        merging=True,
-        is_active_merging=False,
-        queue_for_merge_callback=queue_for_merge,
-        log=log,
-    )
-    await set_head_of_queue_label(present=False)
-    log.info("merge completed, remove target marker", target_name=target_name)
-    await redis_bot.delete(target_name)
-    await redis_bot.delete(target_name + ":time")
+    try:
+        await set_head_of_queue_label(present=True)
+        log.info("evaluate PR for merging")
+        await evaluate_pr(
+            install=webhook_event.installation_id,
+            owner=webhook_event.repo_owner,
+            repo=webhook_event.repo_name,
+            number=webhook_event.pull_request_number,
+            dequeue_callback=dequeue,
+            requeue_callback=requeue,
+            merging=True,
+            is_active_merging=False,
+            queue_for_merge_callback=queue_for_merge,
+            log=log,
+        )
+    finally:
+        # Also on an exception: a marker that outlives its processing would
+        # keep this PR out of the merge queue (see enqueue_for_repo).
+        try:
+            await set_head_of_queue_label(present=False)
+        finally:
+            log.info("merge completed, remove target marker", target_name=target_name)
+            await redis_bot.delete(target_name)
+            await redis_bot.delete(target_name + ":time")
 
 
 async def repo_queue_consumer(*, queue_name: str) -> typing.NoReturn:
@@ -514,6 +520,9 @@ class RedisWebhookQueue:
         )
         for merge_result in merge_queues:
             queue_name = merge_result.decode()
+            # Nothing is being merged when we start. A marker left by a crash
+            # would keep its PR out of the queue (see enqueue_for_repo).
+            await redis_bot.delete(queue_name + ":target", queue_name + ":target:time")
             self.start_repo_worker(queue_name=queue_name)
 
         for webhook_result in webhook_queues:
@@ -588,6 +597,23 @@ class RedisWebhookQueue:
         returns position of event in queue
         """
         queue_name = get_merge_queue_name(event)
+        # The PR the repo worker is merging right now must not re-enter the
+        # queue behind itself: it would be popped a second time after the
+        # merge, only to be dequeued as merged. Read the worker's marker here,
+        # at enqueue time; the is_active_merging flag an evaluation carries
+        # was read before its GitHub fetch and can be stale by now.
+        if (
+            await redis_bot.get(event.get_merge_target_queue_name())
+            == event.json().encode()
+        ):
+            logger.info(
+                "PR is being merged, not re-enqueuing",
+                owner=event.repo_owner,
+                repo=event.repo_name,
+                number=event.pull_request_number,
+                install=event.installation_id,
+            )
+            return 0
         async with redis_bot.pipeline(transaction=True) as pipe:
             merge_queues_by_install = f"merge_queue_by_install:{event.installation_id}"
             pipe.sadd(merge_queues_by_install, queue_name)
