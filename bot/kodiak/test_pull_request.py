@@ -562,3 +562,75 @@ async def test_update_ref_service_unavailable() -> None:
     assert e.value.method == "pull_request/update_ref"
     assert e.value.status_code == 503
     assert b"Service Unavailable" in e.value.response
+
+
+async def test_pr_v2_set_head_of_queue_label_adds_when_missing() -> None:
+    """
+    With merge.head_of_queue_label configured, present=True adds the label
+    when the pull request does not have it.
+    """
+    client = create_client()
+    client.add_label.response = create_response(content=b"", status_code=204)
+    event = create_event()
+    assert isinstance(event.config, V1)
+    event.config.merge.head_of_queue_label = "merge-queue-head"
+    event.pull_request.labels = ["automerge"]
+    pr_v2 = create_prv2(event=event, client=client)
+    await pr_v2.set_head_of_queue_label(present=True)
+    assert client.add_label.call_count == 1
+    assert client.add_label.calls[0]["label"] == "merge-queue-head"
+    assert client.delete_label.call_count == 0
+
+
+async def test_pr_v2_set_head_of_queue_label_removes_when_present() -> None:
+    """
+    present=False removes the label when the pull request has it, and leaves
+    the pull request alone when it does not.
+    """
+    client = create_client()
+    client.delete_label.response = create_response(content=b"", status_code=204)
+    event = create_event()
+    assert isinstance(event.config, V1)
+    event.config.merge.head_of_queue_label = "merge-queue-head"
+    event.pull_request.labels = ["automerge", "merge-queue-head"]
+    pr_v2 = create_prv2(event=event, client=client)
+    await pr_v2.set_head_of_queue_label(present=False)
+    assert client.delete_label.call_count == 1
+    assert client.delete_label.calls[0]["label"] == "merge-queue-head"
+
+    event.pull_request.labels = ["automerge"]
+    await pr_v2.set_head_of_queue_label(present=False)
+    assert client.delete_label.call_count == 1, "nothing to remove"
+    assert client.add_label.call_count == 0
+
+
+async def test_pr_v2_set_head_of_queue_label_not_configured() -> None:
+    """
+    Without merge.head_of_queue_label nothing happens.
+    """
+    client = create_client()
+    event = create_event()
+    assert isinstance(event.config, V1)
+    assert event.config.merge.head_of_queue_label is None
+    pr_v2 = create_prv2(event=event, client=client)
+    await pr_v2.set_head_of_queue_label(present=True)
+    await pr_v2.set_head_of_queue_label(present=False)
+    assert client.add_label.call_count == 0
+    assert client.delete_label.call_count == 0
+
+
+async def test_pr_v2_set_head_of_queue_label_api_error_is_not_fatal() -> None:
+    """
+    A failed label call must not interrupt merging, so no exception escapes.
+    """
+    client = create_client()
+    client.add_label.response = create_response(
+        content=b"<html>Service Unavailable</html>", status_code=503
+    )
+    event = create_event()
+    assert isinstance(event.config, V1)
+    event.config.merge.head_of_queue_label = "merge-queue-head"
+    event.pull_request.labels = []
+    pr_v2 = create_prv2(event=event, client=client)
+    await pr_v2.set_head_of_queue_label(present=True)
+    assert client.add_label.call_count == 1

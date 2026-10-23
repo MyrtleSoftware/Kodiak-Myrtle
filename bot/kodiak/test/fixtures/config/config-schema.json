@@ -47,6 +47,7 @@
         "update_branch_immediately": false,
         "prioritize_ready_to_merge": false,
         "priority_merge_label": null,
+        "head_of_queue_label": null,
         "do_not_merge": false
       },
       "allOf": [
@@ -364,6 +365,10 @@
         },
         "priority_merge_label": {
           "title": "Priority Merge Label",
+          "type": "string"
+        },
+        "head_of_queue_label": {
+          "title": "Head Of Queue Label",
           "type": "string"
         },
         "do_not_merge": {
