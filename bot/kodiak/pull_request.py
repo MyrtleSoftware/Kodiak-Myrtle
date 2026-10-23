@@ -73,7 +73,11 @@ async def evaluate_pr(
     queue_for_merge_callback: QueueForMergeCallback,
     is_active_merging: bool,
     log: structlog.BoundLogger,
-) -> None:
+) -> Optional[PRV2]:
+    """
+    Returns the pull request as last fetched, or None if it could not be
+    fetched, so callers can act on its state after the evaluation.
+    """
     skippable_check_timeout = 4
     api_call_retries_remaining = 5
     api_call_errors = []  # type: list[APICallError]
@@ -102,7 +106,7 @@ async def evaluate_pr(
                             http_status_code=0,
                             response=b"",
                         )
-                    return
+                    return None
                 await asyncio.wait_for(
                     mergeable(
                         api=pr,
@@ -155,7 +159,7 @@ async def evaluate_pr(
                     log.info("problem contacting remote api. retrying")
                     continue
                 log.warning("api_call_retries_remaining", exc_info=True)
-            return
+            return pr
         except asyncio.TimeoutError:
             # On timeout we add the PR to the back of the queue to try again.
             log.warning("mergeable_timeout", exc_info=True)
@@ -463,7 +467,10 @@ class PRV2:
                 await self.add_label(label)
             elif not present and has_label:
                 await self.remove_label(label)
-        except ApiCallException:
+        except ApiCallException as e:
+            if not present and e.status_code == 404:
+                # already removed, e.g. by the queue worker meanwhile
+                return
             self.log.warning(
                 "failed to set head of queue label",
                 label=label,
