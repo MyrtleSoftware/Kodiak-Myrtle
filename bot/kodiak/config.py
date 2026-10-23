@@ -119,6 +119,10 @@ class Merge(BaseModel):
     prioritize_ready_to_merge: bool = False
     # when applied to a PR, add the PR to the front of the merge queue.
     priority_merge_label: Optional[str] = None
+    # label that marks the PR Kodiak is currently merging from the merge
+    # queue, the head of the queue. Kodiak adds it when it starts merging a PR
+    # and removes it when it stops, whether or not the merge succeeded.
+    head_of_queue_label: Optional[str] = None
     # never merge a PR. This can be used with merge.update_branch_immediately to
     # automatically update a PR without merging.
     do_not_merge: bool = False

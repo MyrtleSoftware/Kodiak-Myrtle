@@ -274,6 +274,15 @@ When the label is applied to a pull request, the pull request will be placed at 
 
 If two PRs have the `merge.priority_merge_label` label, either one may be first in queue.
 
+### `merge.head_of_queue_label`
+
+- **type:** `string`
+- **default:** `null`
+
+When set, Kodiak keeps this label on the pull request it is currently merging from its merge queue, the head of the queue, and on no other pull request. Kodiak adds the label when it starts merging the pull request and removes it when it stops, whether the merge succeeded or not.
+
+This lets other systems act on the pull request the next merge is waiting on, for example a CI system that prioritizes its builds.
+
 ### `merge.do_not_merge`
 
 - **type:** `boolean`

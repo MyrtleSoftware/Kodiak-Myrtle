@@ -29,7 +29,7 @@ from kodiak.events import (
     StatusEvent,
 )
 from kodiak.events.status import Branch
-from kodiak.pull_request import evaluate_pr
+from kodiak.pull_request import evaluate_pr, get_pr
 from kodiak.queries import Client
 from kodiak.redis_client import redis_bot, redis_web_api
 
@@ -401,6 +401,32 @@ async def process_repo_queue(log: structlog.BoundLogger, queue_name: str) -> Non
     async def queue_for_merge(*, first: bool) -> Optional[int]:
         raise NotImplementedError
 
+    async def set_head_of_queue_label(*, present: bool) -> None:
+        """
+        This PR is the head of the merge queue while we work on it. Keep
+        `merge.head_of_queue_label`, if configured, on it for exactly that time.
+        """
+        try:
+            pr = await asyncio.wait_for(
+                get_pr(
+                    install=webhook_event.installation_id,
+                    owner=webhook_event.repo_owner,
+                    repo=webhook_event.repo_name,
+                    number=webhook_event.pull_request_number,
+                    dequeue_callback=dequeue,
+                    requeue_callback=requeue,
+                    queue_for_merge_callback=queue_for_merge,
+                ),
+                timeout=60,
+            )
+        except asyncio.TimeoutError:
+            log.warning("timeout fetching PR for head of queue label", exc_info=True)
+            return
+        if pr is None:
+            return
+        await pr.set_head_of_queue_label(present=present)
+
+    await set_head_of_queue_label(present=True)
     log.info("evaluate PR for merging")
     await evaluate_pr(
         install=webhook_event.installation_id,
@@ -414,6 +440,7 @@ async def process_repo_queue(log: structlog.BoundLogger, queue_name: str) -> Non
         queue_for_merge_callback=queue_for_merge,
         log=log,
     )
+    await set_head_of_queue_label(present=False)
     log.info("merge completed, remove target marker", target_name=target_name)
     await redis_bot.delete(target_name)
     await redis_bot.delete(target_name + ":time")

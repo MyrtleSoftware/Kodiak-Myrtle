@@ -2563,3 +2563,67 @@ async def test_mergeable_priority_merge_label() -> None:
     assert api.dequeue.call_count == 0
     assert api.update_branch.call_count == 0
     assert api.merge.call_count == 0
+
+
+async def test_mergeable_head_of_queue_label_removed_when_not_active() -> None:
+    """
+    The queue worker keeps merge.head_of_queue_label on the pull request it is
+    merging. An evaluation of any other pull request carrying the label, for
+    instance after a worker restart, removes it.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    pull_request = create_pull_request()
+    config.merge.head_of_queue_label = "merge-queue-head"
+    pull_request.labels.append("merge-queue-head")
+
+    await mergeable(api=api, config=config, pull_request=pull_request)
+    assert api.remove_label.call_count == 1
+    assert api.remove_label.calls[0]["label"] == "merge-queue-head"
+
+
+@pytest.mark.parametrize(
+    "merging,is_active_merge", [(True, False), (False, True), (True, True)]
+)
+async def test_mergeable_head_of_queue_label_kept_on_active_merge(
+    merging: bool, is_active_merge: bool
+) -> None:
+    """
+    The pull request being merged keeps merge.head_of_queue_label, both in the
+    merging evaluation and in webhook evaluations of the same pull request.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    pull_request = create_pull_request()
+    config.merge.head_of_queue_label = "merge-queue-head"
+    pull_request.labels.append("merge-queue-head")
+
+    await mergeable(
+        api=api,
+        config=config,
+        pull_request=pull_request,
+        merging=merging,
+        is_active_merge=is_active_merge,
+    )
+    assert api.remove_label.call_count == 0
+
+
+async def test_mergeable_head_of_queue_label_absent_or_unconfigured() -> None:
+    """
+    No label call when the pull request lacks the label or the option is unset.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    config.merge.head_of_queue_label = "merge-queue-head"
+    await mergeable(api=api, config=config)
+    assert api.remove_label.call_count == 0
+
+    api = create_api()
+    config = create_config()
+    pull_request = create_pull_request()
+    pull_request.labels.append("merge-queue-head")
+    await mergeable(api=api, config=config, pull_request=pull_request)
+    assert api.remove_label.call_count == 0

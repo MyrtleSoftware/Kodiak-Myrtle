@@ -770,6 +770,20 @@ async def mergeable(
         return
 
     pull_request_labels = set(pull_request.labels)
+
+    # `merge.head_of_queue_label` marks the pull request being merged from the
+    # merge queue; the queue worker adds and removes it. Take it off any other
+    # pull request, for instance one left over from a worker restart part way
+    # through a merge.
+    if (
+        config.merge.head_of_queue_label is not None
+        and config.merge.head_of_queue_label in pull_request_labels
+        and not merging
+        and not is_active_merge
+    ):
+        log.info("removing stale head of queue label")
+        await api.remove_label(config.merge.head_of_queue_label)
+
     config_automerge_labels = (
         {config.merge.automerge_label}
         if isinstance(config.merge.automerge_label, str)

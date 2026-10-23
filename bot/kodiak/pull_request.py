@@ -10,7 +10,7 @@ from typing_extensions import Protocol
 
 import kodiak.app_config as conf
 from kodiak.assertions import assert_never
-from kodiak.config import UpdateMethod
+from kodiak.config import V1, UpdateMethod
 from kodiak.errors import (
     ApiCallException,
     GitHubApiInternalServerError,
@@ -443,6 +443,33 @@ class PRV2:
                     http_status_code=res.status_code,
                     response=res.content,
                 ) from exc
+
+    async def set_head_of_queue_label(self, *, present: bool) -> None:
+        """
+        Add or remove `merge.head_of_queue_label` so that the label is on this
+        pull request exactly when `present` is true.
+
+        Best effort: a failure is logged but does not interrupt the merge.
+        """
+        config = self.event.config
+        if not isinstance(config, V1):
+            return
+        label = config.merge.head_of_queue_label
+        if label is None:
+            return
+        has_label = label in self.event.pull_request.labels
+        try:
+            if present and not has_label:
+                await self.add_label(label)
+            elif not present and has_label:
+                await self.remove_label(label)
+        except ApiCallException:
+            self.log.warning(
+                "failed to set head of queue label",
+                label=label,
+                present=present,
+                exc_info=True,
+            )
 
     async def remove_label(self, label: str) -> None:
         """
