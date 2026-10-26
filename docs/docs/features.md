@@ -74,6 +74,7 @@ Kodiak has some internal features to disable merging as well:
 
 - [`merge.blocking_title_regex`](config-reference.md#mergeblocking_title_regex) – disable Kodiak merging based on a regex matching to the pull request title
 - [`merge.blocking_labels`](config-reference.md#mergeblocking_labels) – disable Kodiak merging based on labels applied to the PR
+- [`merge.block_on_merge_commits`](config-reference.md#mergeblock_on_merge_commits) – block merging while the pull request's branch contains merge commits
 - [`merge.do_not_merge`](config-reference.md#mergedo_not_merge) – completely disable Kodiak from merging any PR. This is useful if you only want to use Kodiak for updating pull requests.
 
 ### Efficient Merging

@@ -32,7 +32,7 @@ from kodiak.queries.commits import (
     CommitConnection,
     GitActor,
     User as PullRequestCommitUser,
-    get_commits,
+    get_commit_history,
 )
 from kodiak.redis_client import redis_web_api
 from kodiak.throttle import get_thottler_for_installation
@@ -285,6 +285,7 @@ query GetEventInfo($owner: String!, $repo: String!, $PRNumber: Int!) {
         }
       }
       commitHistory: commits(last: 100) {
+        totalCount
         nodes {
           commit {
             author {
@@ -477,6 +478,8 @@ class EventInfoResponse:
     check_runs: List[CheckRun] = field(default_factory=list)
     valid_merge_methods: List[MergeMethod] = field(default_factory=list)
     commits: List[Commit] = field(default_factory=list)
+    # None when unknown; otherwise the total, of which `commits` holds the last 100
+    commit_count: Optional[int] = None
 
 
 MERGE_PR_MUTATION = """
@@ -1266,6 +1269,7 @@ query {
 
         all_reviews = get_reviews(pr=pull_request)
         bot_reviews = self.get_bot_reviews(reviews=all_reviews)
+        commits, commit_count = get_commit_history(pr=pull_request)
         return EventInfoResponse(
             config=cfg.parsed,
             config_str=cfg.text,
@@ -1284,7 +1288,8 @@ query {
             review_requests=get_requested_reviews(pr=pull_request),
             bot_reviews=bot_reviews,
             status_contexts=get_status_contexts(pr=pull_request),
-            commits=get_commits(pr=pull_request),
+            commits=commits,
+            commit_count=commit_count,
             check_runs=get_check_runs(pr=pull_request),
             head_exists=get_head_exists(pr=pull_request),
             valid_merge_methods=get_valid_merge_methods(repo=repository),

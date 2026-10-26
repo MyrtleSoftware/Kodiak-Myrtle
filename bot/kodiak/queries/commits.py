@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pydantic
 import structlog
@@ -36,23 +36,30 @@ class PullRequestCommit(pydantic.BaseModel):
 
 class PullRequestCommitConnection(pydantic.BaseModel):
     nodes: Optional[List[PullRequestCommit]]
+    totalCount: Optional[int] = None
 
 
 class PullRequest(pydantic.BaseModel):
     commitHistory: PullRequestCommitConnection
 
 
-def get_commits(*, pr: Dict[str, Any]) -> List[Commit]:
+def get_commit_history(*, pr: Dict[str, Any]) -> Tuple[List[Commit], Optional[int]]:
     """
-    Extract the commit authors from the pull request commits.
+    The pull request's commits (the last 100, see the commitHistory query) and
+    its total commit count, which tells whether that list is complete.
     """
-    # we use a dict as an ordered set.
     try:
         pull_request = PullRequest.parse_obj(pr)
     except pydantic.ValidationError:
         logger.exception("problem parsing commit authors")
-        return []
+        return [], None
     nodes = pull_request.commitHistory.nodes
-    if not nodes:
-        return []
-    return [node.commit for node in nodes]
+    commits = [node.commit for node in nodes] if nodes else []
+    return commits, pull_request.commitHistory.totalCount
+
+
+def get_commits(*, pr: Dict[str, Any]) -> List[Commit]:
+    """
+    Extract the commit authors from the pull request commits.
+    """
+    return get_commit_history(pr=pr)[0]

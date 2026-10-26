@@ -628,6 +628,7 @@ async def mergeable(
     api_call_errors: Sequence[APICallRetry],
     subscription: Optional[Subscription],
     app_id: Optional[str] = None,
+    commit_count: Optional[int] = None,
 ) -> None:
     # TODO(chdsbd): Use structlog bind_contextvars to automatically set useful context (install id, repo, pr number).
     log = logger.bind(number=pull_request.number, url=pull_request.url)
@@ -926,6 +927,27 @@ async def mergeable(
             )
             await api.create_comment(body)
         return
+
+    if config.merge.block_on_merge_commits:
+        merge_commit_count = sum(
+            1 for commit in commits if commit.parents.totalCount > 1
+        )
+        if merge_commit_count:
+            plural = "s" if merge_commit_count != 1 else ""
+            await block_merge(
+                api,
+                pull_request,
+                f"pull request has {merge_commit_count} merge commit{plural}; rebase it onto {pull_request.baseRefName!r}",
+            )
+            return
+        # `commits` holds the last 100 commits only. Refuse what we cannot see.
+        if commit_count is not None and commit_count > len(commits):
+            await block_merge(
+                api,
+                pull_request,
+                f"pull request has {commit_count} commits, more than the {len(commits)} inspected; cannot verify it has no merge commits",
+            )
+            return
 
     blacklist_labels = set(config.merge.blacklist_labels) & set(pull_request.labels)
     blocking_labels = set(config.merge.blocking_labels) & set(pull_request.labels)

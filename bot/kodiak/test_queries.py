@@ -50,9 +50,8 @@ from kodiak.queries import (
     StatusState,
     Subscription,
     get_branch_protection,
-    get_commits,
 )
-from kodiak.queries.commits import CommitConnection, GitActor
+from kodiak.queries.commits import CommitConnection, GitActor, get_commits
 from kodiak.redis_client import redis_bot
 from kodiak.test_utils import wrap_future
 from kodiak.tests.fixtures import FakeThottler, create_commit, requires_redis
