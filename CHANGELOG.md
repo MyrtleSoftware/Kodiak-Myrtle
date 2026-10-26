@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Statuses that stop a merge ("cannot merge", configuration errors) are posted as failed check runs, so they show as a red X. Other statuses stay neutral, which GitHub lists as "skipped".
 - Upgrade PyJWT from 1.x to 2.x.
 
 ### Added

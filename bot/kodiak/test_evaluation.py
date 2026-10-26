@@ -82,9 +82,15 @@ class MockDequeue(BaseMockFunc):
 
 class MockSetStatus(BaseMockFunc):
     async def __call__(
-        self, msg: str, *, markdown_content: Optional[str] = None
+        self,
+        msg: str,
+        *,
+        markdown_content: Optional[str] = None,
+        conclusion: str = "neutral",
     ) -> None:
-        self.log_call(dict(msg=msg, markdown_content=markdown_content))
+        self.log_call(
+            dict(msg=msg, markdown_content=markdown_content, conclusion=conclusion)
+        )
 
 
 class MockPullRequestsForRef(BaseMockFunc):
@@ -1793,6 +1799,7 @@ async def test_mergeable_passing() -> None:
     await mergeable(api=api)
     assert api.set_status.call_count == 1
     assert "enqueued for merge (position=4th)" in api.set_status.calls[0]["msg"]
+    assert api.set_status.calls[0]["conclusion"] == "neutral"
     assert api.queue_for_merge.call_count == 1
     assert api.dequeue.call_count == 0
 
@@ -2594,6 +2601,7 @@ async def test_mergeable_block_on_merge_commits() -> None:
     assert api.set_status.call_count == 1
     assert "pull request has 1 merge commit;" in api.set_status.calls[0]["msg"]
     assert "rebase it onto 'master'" in api.set_status.calls[0]["msg"]
+    assert api.set_status.calls[0]["conclusion"] == "failure", "a red X, not grey"
     assert api.dequeue.call_count == 1
     assert api.merge.call_count == 0
 

@@ -217,7 +217,11 @@ class PRV2:
         await self.requeue_callback()
 
     async def set_status(
-        self, msg: str, *, markdown_content: Optional[str] = None
+        self,
+        msg: str,
+        *,
+        markdown_content: Optional[str] = None,
+        conclusion: str = "neutral",
     ) -> None:
         """
         Display a message to a user through a github check
@@ -226,7 +230,12 @@ class PRV2:
         status check. This detail view is accessible via the "Details" link
         alongside the summary/detail content.
         """
-        self.log.info("set_status", message=msg, markdown_content=markdown_content)
+        self.log.info(
+            "set_status",
+            message=msg,
+            markdown_content=markdown_content,
+            conclusion=conclusion,
+        )
         async with self.client(
             installation_id=self.install, owner=self.owner, repo=self.repo
         ) as api_client:
@@ -234,6 +243,7 @@ class PRV2:
                 head_sha=self.event.pull_request.latest_sha,
                 message=msg,
                 summary=markdown_content,
+                conclusion=conclusion,
             )
             try:
                 res.raise_for_status()
