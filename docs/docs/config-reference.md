@@ -129,7 +129,7 @@ Block merging while the pull request's branch contains merge commits, that is co
 
 This option is about the pull request's own commits. It is not GitHub's "Require linear history" branch protection setting, which forbids merge commits on the base branch itself and is incompatible with `merge.method = "merge"`.
 
-Kodiak inspects the pull request's last 100 commits. A pull request with more commits is blocked as well, since the rest cannot be checked.
+Kodiak inspects all of the pull request's commits, fetched in pages of 100 up to 1,000 commits. A pull request with more commits than that, or whose commits could not all be fetched, is blocked as well, since the rest cannot be checked.
 
 The check runs on every evaluation, whether or not the pull request carries the automerge label, so the author learns about it as soon as the pull request is opened or pushed to.
 

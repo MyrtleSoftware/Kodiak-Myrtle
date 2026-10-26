@@ -43,6 +43,16 @@ class PullRequest(pydantic.BaseModel):
     commitHistory: PullRequestCommitConnection
 
 
+class PageInfo(pydantic.BaseModel):
+    hasNextPage: bool
+    endCursor: Optional[str]
+
+
+class PullRequestCommitPage(pydantic.BaseModel):
+    nodes: Optional[List[PullRequestCommit]]
+    pageInfo: PageInfo
+
+
 def get_commit_history(*, pr: Dict[str, Any]) -> Tuple[List[Commit], Optional[int]]:
     """
     The pull request's commits (the last 100, see the commitHistory query) and
@@ -63,3 +73,19 @@ def get_commits(*, pr: Dict[str, Any]) -> List[Commit]:
     Extract the commit authors from the pull request commits.
     """
     return get_commit_history(pr=pr)[0]
+
+
+def parse_commit_page(
+    *, connection: Dict[str, Any]
+) -> Optional[Tuple[List[Commit], PageInfo]]:
+    """
+    One page of a pull request's commits connection, as returned by
+    GET_PULL_REQUEST_COMMITS_QUERY.
+    """
+    try:
+        page = PullRequestCommitPage.parse_obj(connection)
+    except pydantic.ValidationError:
+        logger.exception("problem parsing commit page")
+        return None
+    commits = [node.commit for node in page.nodes] if page.nodes else []
+    return commits, page.pageInfo

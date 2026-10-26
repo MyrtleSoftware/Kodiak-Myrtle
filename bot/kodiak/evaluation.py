@@ -905,12 +905,13 @@ async def mergeable(
                 f"pull request has {merge_commit_count} merge commit{plural}; rebase it onto {pull_request.baseRefName!r}",
             )
             return
-        # `commits` holds the last 100 commits only. Refuse what we cannot see.
+        # Not all commits could be fetched (see Client.get_all_commits).
+        # Refuse what we cannot see.
         if commit_count is not None and commit_count > len(commits):
             await block_merge(
                 api,
                 pull_request,
-                f"pull request has {commit_count} commits, more than the {len(commits)} inspected; cannot verify it has no merge commits",
+                f"pull request has {commit_count} commits but only {len(commits)} could be fetched; cannot verify it has no merge commits",
             )
             return
 

@@ -2658,8 +2658,8 @@ async def test_mergeable_block_on_merge_commits_disabled() -> None:
 
 async def test_mergeable_block_on_merge_commits_too_many_to_inspect() -> None:
     """
-    The commit list is capped at the last 100 commits. When the pull request
-    has more, we cannot prove the rest are linear, so we block.
+    When not all commits could be fetched (more than the page limit, or an
+    API error while paging), we cannot prove the rest are linear, so we block.
     """
     api = create_api()
     mergeable = create_mergeable()
@@ -2674,6 +2674,6 @@ async def test_mergeable_block_on_merge_commits_too_many_to_inspect() -> None:
         merging=True,
     )
     assert api.set_status.call_count == 1
-    assert "150 commits, more than the 2 inspected" in api.set_status.calls[0]["msg"]
+    assert "150 commits but only 2 could be fetched" in api.set_status.calls[0]["msg"]
     assert api.dequeue.call_count == 1
     assert api.merge.call_count == 0
