@@ -496,7 +496,9 @@ async def test_mergeable_missing_branch_protection() -> None:
     await mergeable(api=api, branch_protection=None)
     assert api.set_status.call_count == 1
     assert api.dequeue.call_count == 1
-    assert "config error" in api.set_status.calls[0]["msg"]
+    msg = api.set_status.calls[0]["msg"]
+    assert msg.startswith("Ignored (base branch 'master' has no branch protection")
+    assert "config error" not in msg
 
     # verify we haven't tried to update/merge the PR
     assert api.update_branch.called is False

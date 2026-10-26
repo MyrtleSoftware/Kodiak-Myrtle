@@ -708,8 +708,14 @@ async def mergeable(
     if branch_protection is None and not has_equivalent_branch_protection_rulesets(
         ruleset_rules
     ):
-        await cfg_err(
-            api, f"missing branch protection for baseRef: {pull_request.baseRefName!r}"
+        # Not a configuration error from the pull request's point of view: a
+        # branch without protection is a branch Kodiak does not merge into,
+        # e.g. the parent branch of a pull request above the bottom of a
+        # stack. When the pull request is retargeted, GitHub sends an event
+        # and this evaluation runs again.
+        await api.dequeue()
+        await set_status(
+            f"Ignored (base branch {pull_request.baseRefName!r} has no branch protection; Kodiak merges only into protected branches)"
         )
         return
 

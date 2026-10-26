@@ -18,6 +18,8 @@ Kodiak acts like a GitHub user. Any feature that works for a GitHub user likely 
 
 Kodiak's behavior is largely driven by [GitHub Branch Protection](https://help.github.com/en/github/administering-a-repository/configuring-protected-branches). If a PR is blocked from merging by a missing required status check, missing approval, merge conflict, etc., Kodiak will not merge the PR.
 
+Kodiak merges only into branches that have branch protection or an equivalent ruleset. A pull request whose base branch has neither, for example the parent branch of a pull request above the bottom of a stack, gets the status `Ignored (base branch '...' has no branch protection; Kodiak merges only into protected branches)` and is left alone. Once the pull request is retargeted to a protected branch, Kodiak evaluates it again.
+
 ## Updating Pull Requests
 
 To have Kodiak update branches you must enable the "Require branches to be up to date before merging" GitHub Branch Protection setting.
