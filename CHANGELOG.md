@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Statuses that stop a merge ("cannot merge", configuration errors) are posted as failed check runs, so they show as a red X. Other statuses stay neutral, which GitHub lists as "skipped".
+- A pull request whose base branch has no branch protection now gets the status "Ignored (base branch ... has no branch protection; Kodiak merges only into protected branches)" instead of a configuration error. Stacked pull requests above the bottom of their stack target such branches until they are retargeted.
 - Upgrade PyJWT from 1.x to 2.x.
 
 ### Added
