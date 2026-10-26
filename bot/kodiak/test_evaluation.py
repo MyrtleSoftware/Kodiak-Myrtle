@@ -46,6 +46,7 @@ from kodiak.queries import (
     SubscriptionExpired,
     TrialExpired,
 )
+from kodiak.tests.fixtures import create_commit
 
 log = logging.getLogger(__name__)
 
@@ -345,6 +346,7 @@ class MergeableType(Protocol):
         contexts: List[StatusContext] = ...,
         check_runs: List[CheckRun] = ...,
         commits: List[Commit] = ...,
+        commit_count: Optional[int] = ...,
         valid_merge_methods: List[MergeMethod] = ...,
         merging: bool = ...,
         is_active_merge: bool = ...,
@@ -372,6 +374,7 @@ def create_mergeable() -> MergeableType:
         contexts: List[StatusContext] = [create_context()],  # noqa: B006
         check_runs: List[CheckRun] = [create_check_run()],  # noqa: B006
         commits: List[Commit] = [],  # noqa: B006
+        commit_count: Optional[int] = None,
         valid_merge_methods: List[MergeMethod] = [  # noqa: B006
             MergeMethod.merge,
             MergeMethod.squash,
@@ -403,6 +406,7 @@ def create_mergeable() -> MergeableType:
             contexts=contexts,
             check_runs=check_runs,
             commits=commits,
+            commit_count=commit_count,
             valid_merge_methods=valid_merge_methods,
             repository=repository,
             merging=merging,
@@ -2562,4 +2566,92 @@ async def test_mergeable_priority_merge_label() -> None:
 
     assert api.dequeue.call_count == 0
     assert api.update_branch.call_count == 0
+    assert api.merge.call_count == 0
+
+
+def create_linear_commits(n: int) -> List[Commit]:
+    return [
+        create_commit(database_id=100 + i, name="Ada", login="ada", type="User")
+        for i in range(n)
+    ]
+
+
+async def test_mergeable_block_on_merge_commits() -> None:
+    """
+    With merge.block_on_merge_commits a pull request whose branch contains a
+    merge commit (two parents) is blocked and dequeued, not merged.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    config.merge.block_on_merge_commits = True
+    commits = [
+        *create_linear_commits(2),
+        create_commit(database_id=7, name="Ada", login="ada", type="User", parents=2),
+    ]
+
+    await mergeable(api=api, config=config, commits=commits, merging=True)
+    assert api.set_status.call_count == 1
+    assert "pull request has 1 merge commit;" in api.set_status.calls[0]["msg"]
+    assert "rebase it onto 'master'" in api.set_status.calls[0]["msg"]
+    assert api.dequeue.call_count == 1
+    assert api.merge.call_count == 0
+
+
+async def test_mergeable_block_on_merge_commits_linear_history_merges() -> None:
+    """
+    With the option on and no merge commits, merging proceeds as usual.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    config.merge.block_on_merge_commits = True
+
+    await mergeable(
+        api=api,
+        config=config,
+        commits=create_linear_commits(3),
+        commit_count=3,
+        merging=True,
+    )
+    assert api.merge.call_count == 1
+    assert api.dequeue.call_count == 0
+
+
+async def test_mergeable_block_on_merge_commits_disabled() -> None:
+    """
+    Off by default: merge commits in the branch do not block.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    assert config.merge.block_on_merge_commits is False
+    commits = [
+        create_commit(database_id=7, name="Ada", login="ada", type="User", parents=2)
+    ]
+
+    await mergeable(api=api, config=config, commits=commits, merging=True)
+    assert api.merge.call_count == 1
+
+
+async def test_mergeable_block_on_merge_commits_too_many_to_inspect() -> None:
+    """
+    The commit list is capped at the last 100 commits. When the pull request
+    has more, we cannot prove the rest are linear, so we block.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    config.merge.block_on_merge_commits = True
+
+    await mergeable(
+        api=api,
+        config=config,
+        commits=create_linear_commits(2),
+        commit_count=150,
+        merging=True,
+    )
+    assert api.set_status.call_count == 1
+    assert "150 commits, more than the 2 inspected" in api.set_status.calls[0]["msg"]
+    assert api.dequeue.call_count == 1
     assert api.merge.call_count == 0

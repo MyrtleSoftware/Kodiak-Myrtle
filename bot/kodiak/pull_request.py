@@ -129,6 +129,7 @@ async def evaluate_pr(
                         contexts=pr.event.status_contexts,
                         check_runs=pr.event.check_runs,
                         commits=pr.event.commits,
+                        commit_count=pr.event.commit_count,
                         valid_merge_methods=pr.event.valid_merge_methods,
                         merging=merging,
                         is_active_merge=is_active_merging,

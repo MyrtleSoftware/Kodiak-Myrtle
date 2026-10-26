@@ -120,6 +120,19 @@ GitHub considers a "neutral" check run conclusion as passing GitHub branch prote
 
 When enabled, pull requests won't be merged if a required check run has a neutral conclusion.
 
+### `merge.block_on_merge_commits`
+
+- **type:** `boolean`
+- **default:** `false`
+
+Block merging while the pull request's branch contains merge commits, that is commits with two parents, such as the ones `git merge main` leaves behind. The author rebases the branch onto the base branch to clear the block. This keeps each pull request's commits linear, which matters with `merge.method = "rebase_fast_forward"`, where the branch's commits land on the base branch exactly as they are, and with `"merge"`, where they stay visible in the base branch's history.
+
+This option is about the pull request's own commits. It is not GitHub's "Require linear history" branch protection setting, which forbids merge commits on the base branch itself and is incompatible with `merge.method = "merge"`.
+
+Kodiak inspects the pull request's last 100 commits. A pull request with more commits is blocked as well, since the rest cannot be checked.
+
+When a pull request is out of date and `update.method = "rebase"` is configured, Kodiak's own rebase of the branch removes merge commits as a side effect, so this check mostly bites pull requests that are up to date and still carry one.
+
 <span id="mergeblacklist_title_regex"/> <!-- handle old links -->
 
 ### `merge.blocking_title_regex`
