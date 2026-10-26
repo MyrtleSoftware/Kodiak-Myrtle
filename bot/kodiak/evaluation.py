@@ -289,7 +289,11 @@ class PRAPI(Protocol):
     async def requeue(self) -> None: ...
 
     async def set_status(
-        self, msg: str, *, markdown_content: Optional[str] = None
+        self,
+        msg: str,
+        *,
+        markdown_content: Optional[str] = None,
+        conclusion: str = "neutral",
     ) -> None: ...
 
     async def pull_requests_for_ref(self, ref: str) -> Optional[int]: ...
@@ -322,16 +326,25 @@ class PRAPI(Protocol):
     async def approve_pull_request(self) -> None: ...
 
 
+# Statuses that stop a merge are posted as failed check runs, so they show as
+# a red X; every other status is neutral, which GitHub lists as "skipped".
+BLOCKING = "failure"
+
+
 async def cfg_err(
     api: PRAPI, msg: str, *, markdown_content: Optional[str] = None
 ) -> None:
     await api.dequeue()
-    await api.set_status(f"⚠️ config error ({msg})", markdown_content=markdown_content)
+    await api.set_status(
+        f"⚠️ config error ({msg})",
+        markdown_content=markdown_content,
+        conclusion=BLOCKING,
+    )
 
 
 async def block_merge(api: PRAPI, pull_request: PullRequest, msg: str) -> None:
     await api.dequeue()
-    await api.set_status(f"🛑 cannot merge ({msg})")
+    await api.set_status(f"🛑 cannot merge ({msg})", conclusion=BLOCKING)
 
 
 def missing_branch_protection_push_allowance(
@@ -641,11 +654,15 @@ async def mergeable(
     # available.
     valid_merge_methods = [*valid_merge_methods, MergeMethod.rebase_fast_forward]
 
-    async def set_status(msg: str, markdown_content: Optional[str] = None) -> None:
+    async def set_status(
+        msg: str, markdown_content: Optional[str] = None, conclusion: str = "neutral"
+    ) -> None:
         # don't clobber statuses set via merge loop.
         if is_active_merge:
             return
-        await api.set_status(msg, markdown_content=markdown_content)
+        await api.set_status(
+            msg, markdown_content=markdown_content, conclusion=conclusion
+        )
 
     if not isinstance(config, V1):
         log.info("invalid config")
@@ -654,6 +671,7 @@ async def mergeable(
             markdown_content=get_markdown_for_config(
                 config, config_str=config_str, git_path=config_path
             ),
+            conclusion=BLOCKING,
         )
         await api.dequeue()
         return
@@ -982,6 +1000,7 @@ async def mergeable(
     except re.exceptions.RegexError:
         await set_status(
             f"⚠️ Invalid blocking_title_regex: {title_blocker.pattern!r}",
+            conclusion=BLOCKING,
         )
         await api.dequeue()
         return

@@ -1539,7 +1539,11 @@ query {
             return await self.session.patch(url, headers=headers, json=dict(sha=sha))
 
     async def create_notification(
-        self, head_sha: str, message: str, summary: Optional[str] = None
+        self,
+        head_sha: str,
+        message: str,
+        summary: Optional[str] = None,
+        conclusion: str = "neutral",
     ) -> http.Response:
         headers = await get_headers(
             session=self.session, installation_id=self.installation_id
@@ -1550,7 +1554,7 @@ query {
             head_sha=head_sha,
             status="completed",
             completed_at=datetime.now(timezone.utc).isoformat(),
-            conclusion="neutral",
+            conclusion=conclusion,
             output=dict(title=message, summary=summary or ""),
         )
         async with self.throttler:
