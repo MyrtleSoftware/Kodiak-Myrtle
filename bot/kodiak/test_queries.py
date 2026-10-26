@@ -13,6 +13,7 @@ from kodiak import app_config as conf
 from kodiak.config import V1, Merge, MergeMethod
 from kodiak.http import Request, Response
 from kodiak.queries import (
+    CHECK_RUN_NAME,
     COMMIT_PAGE_LIMIT,
     GET_PULL_REQUEST_COMMITS_QUERY,
     UPDATE_PR_BRANCH_MUTATION,
@@ -52,6 +53,7 @@ from kodiak.queries import (
     StatusState,
     Subscription,
     get_branch_protection,
+    get_check_runs,
 )
 from kodiak.queries.commits import CommitConnection, GitActor, get_commits
 from kodiak.redis_client import redis_bot
@@ -1131,3 +1133,40 @@ async def test_get_event_info_pages_commits(
         c.kwargs["query"] == GET_PULL_REQUEST_COMMITS_QUERY
         for c in send_query.call_args_list
     ].count(True) == 1
+
+
+def test_get_check_runs_excludes_our_own_status() -> None:
+    """
+    Kodiak's own status check must not feed back into the evaluation: with it
+    listed as a required check, one of our blocking statuses would otherwise
+    block us again on the next evaluation of the same commit.
+    """
+    pr = {
+        "commits": {
+            "nodes": [
+                {
+                    "commit": {
+                        "checkSuites": {
+                            "nodes": [
+                                {
+                                    "checkRuns": {
+                                        "nodes": [
+                                            {
+                                                "name": "ci/unit",
+                                                "conclusion": "SUCCESS",
+                                            },
+                                            {
+                                                "name": CHECK_RUN_NAME,
+                                                "conclusion": "FAILURE",
+                                            },
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            ]
+        }
+    }
+    assert [c.name for c in get_check_runs(pr=pr)] == ["ci/unit"]

@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Kodiak's own status check no longer counts among a pull request's check runs, so listing it as a required check cannot make one of its blocking statuses block Kodiak itself.
 - The merge queue no longer processes a pull request a second time after merging it. Webhook events arriving during a merge used to re-enqueue the pull request being merged.
 - Handle a redacted branch protection push allowance actor. (#926)
 
