@@ -905,9 +905,15 @@ def get_check_runs(*, pr: Dict[str, Any]) -> List[CheckRun]:
         if check_run_dict is None:
             continue
         try:
-            check_runs.append(CheckRun.parse_obj(check_run_dict))
+            check_run = CheckRun.parse_obj(check_run_dict)
         except ValueError:
             logger.warning("Could not parse CheckRun", exc_info=True)
+            continue
+        # Our own status check is output, never input: if someone makes it a
+        # required check, a blocking status of ours must not block us again.
+        if check_run.name == CHECK_RUN_NAME:
+            continue
+        check_runs.append(check_run)
     return check_runs
 
 
