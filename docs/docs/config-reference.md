@@ -120,6 +120,17 @@ GitHub considers a "neutral" check run conclusion as passing GitHub branch prote
 
 When enabled, pull requests won't be merged if a required check run has a neutral conclusion.
 
+### `merge.block_on_skipped_required_check_runs`
+
+- **type:** `boolean`
+- **default:** `false`
+
+GitHub considers a "skipped" check run conclusion as passing GitHub branch protection requirements. A GitHub Actions job whose `if` condition is false ends with that conclusion.
+
+When enabled, pull requests won't be merged if a required check run was skipped. This is for workflows that skip their jobs on some pushes, for example on the restack of a stacked pull request, so that a pull request whose checks never ran waits until they are re-run instead of merging untested.
+
+Turn this on only where a job that path filters rule out still reports success rather than being skipped; otherwise a pull request that legitimately needs no such job could never merge.
+
 ### `merge.block_on_merge_commits`
 
 - **type:** `boolean`

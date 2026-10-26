@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the `merge.block_on_skipped_required_check_runs` configuration option. When enabled, a required check run that was skipped blocks the merge instead of counting as passed.
 - Added the `merge.block_on_merge_commits` configuration option. When enabled, a pull request whose branch contains merge commits is blocked until it is rebased, keeping each pull request's history linear.
 - Added the `merge.head_of_queue_label` configuration option. When set, Kodiak keeps the label on the pull request it is currently merging, the head of its merge queue, so other systems can prioritize it.
 - Added the `update.method` configuration option. Set `update.method = "rebase"` to have Kodiak update out of date pull requests with a rebase instead of a merge commit.
