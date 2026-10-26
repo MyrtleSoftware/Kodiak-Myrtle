@@ -131,6 +131,8 @@ This option is about the pull request's own commits. It is not GitHub's "Require
 
 Kodiak inspects the pull request's last 100 commits. A pull request with more commits is blocked as well, since the rest cannot be checked.
 
+The check runs on every evaluation, whether or not the pull request carries the automerge label, so the author learns about it as soon as the pull request is opened or pushed to.
+
 When a pull request is out of date and `update.method = "rebase"` is configured, Kodiak's own rebase of the branch removes merge commits as a side effect, so this check mostly bites pull requests that are up to date and still carry one.
 
 <span id="mergeblacklist_title_regex"/> <!-- handle old links -->
