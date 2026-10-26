@@ -95,6 +95,10 @@ class Merge(BaseModel):
     block_on_reviews_requested: bool = False
     # block merging if there are neutral required check runs.
     block_on_neutral_required_check_runs: bool = False
+    # block merging if there are skipped required check runs. GitHub counts a
+    # skipped job as passing, so a workflow whose jobs skip themselves (e.g.
+    # on a restack push) would otherwise let an untested pull request merge.
+    block_on_skipped_required_check_runs: bool = False
     # block merging while the pull request's branch contains merge commits
     # (commits with two parents), e.g. from merging the base branch into it.
     block_on_merge_commits: bool = False

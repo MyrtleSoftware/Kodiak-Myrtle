@@ -2687,3 +2687,70 @@ async def test_mergeable_block_on_merge_commits_too_many_to_inspect() -> None:
     assert "150 commits but only 2 could be fetched" in api.set_status.calls[0]["msg"]
     assert api.dequeue.call_count == 1
     assert api.merge.call_count == 0
+
+
+async def test_mergeable_block_on_skipped_required_check_runs() -> None:
+    """
+    GitHub counts a skipped job as passing. With the option on, a required
+    check run that was skipped blocks the merge instead.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    config.merge.block_on_skipped_required_check_runs = True
+
+    await mergeable(
+        api=api,
+        config=config,
+        check_runs=[
+            create_check_run(name="ci/api", conclusion=CheckConclusionState.SKIPPED)
+        ],
+        merging=True,
+    )
+    assert api.set_status.call_count == 1
+    assert "skipped required check runs: {'ci/api'}" in api.set_status.calls[0]["msg"]
+    assert api.set_status.calls[0]["conclusion"] == "failure"
+    assert api.dequeue.call_count == 1
+    assert api.merge.call_count == 0
+
+
+async def test_mergeable_block_on_skipped_required_check_runs_not_required() -> None:
+    """
+    A skipped check run that branch protection does not require is ignored.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    config.merge.block_on_skipped_required_check_runs = True
+
+    await mergeable(
+        api=api,
+        config=config,
+        check_runs=[
+            create_check_run(name="optional", conclusion=CheckConclusionState.SKIPPED)
+        ],
+        merging=True,
+    )
+    assert api.merge.call_count == 1
+    assert api.dequeue.call_count == 0
+
+
+async def test_mergeable_block_on_skipped_required_check_runs_disabled() -> None:
+    """
+    Off by default: a skipped required check run counts as passing, as it does
+    for GitHub branch protection.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    assert config.merge.block_on_skipped_required_check_runs is False
+
+    await mergeable(
+        api=api,
+        config=config,
+        check_runs=[
+            create_check_run(name="ci/api", conclusion=CheckConclusionState.SKIPPED)
+        ],
+        merging=True,
+    )
+    assert api.merge.call_count == 1

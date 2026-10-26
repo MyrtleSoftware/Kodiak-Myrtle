@@ -1071,6 +1071,22 @@ async def mergeable(
             )
             return
 
+    if config.merge.block_on_skipped_required_check_runs:
+        skipped_check_runs = {
+            check_run.name
+            for check_run in deduplicate_check_runs(check_runs)
+            if check_run.conclusion == CheckConclusionState.SKIPPED
+        }
+
+        skipped_required_status_checks = skipped_check_runs & required_status_checks
+        if skipped_required_status_checks:
+            await block_merge(
+                api,
+                pull_request,
+                f"skipped required check runs: {skipped_required_status_checks!r}",
+            )
+            return
+
     wait_for_checks = False
     if pull_request.mergeStateStatus in (
         MergeStateStatus.BLOCKED,
