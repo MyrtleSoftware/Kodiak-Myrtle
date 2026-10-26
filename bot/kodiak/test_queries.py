@@ -4,7 +4,7 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncGenerator, Dict, Iterable, Iterator, cast
+from typing import Any, AsyncGenerator, Dict, Iterable, Iterator, Optional, cast
 
 import pytest
 from pytest_mock import MockFixture
@@ -13,6 +13,9 @@ from kodiak import app_config as conf
 from kodiak.config import V1, Merge, MergeMethod
 from kodiak.http import Request, Response
 from kodiak.queries import (
+    CHECK_RUN_NAME,
+    COMMIT_PAGE_LIMIT,
+    GET_PULL_REQUEST_COMMITS_QUERY,
     UPDATE_PR_BRANCH_MUTATION,
     BranchProtectionRule,
     BypassActor,
@@ -50,9 +53,9 @@ from kodiak.queries import (
     StatusState,
     Subscription,
     get_branch_protection,
-    get_commits,
+    get_check_runs,
 )
-from kodiak.queries.commits import CommitConnection, GitActor
+from kodiak.queries.commits import CommitConnection, GitActor, get_commits
 from kodiak.redis_client import redis_bot
 from kodiak.test_utils import wrap_future
 from kodiak.tests.fixtures import FakeThottler, create_commit, requires_redis
@@ -1009,3 +1012,161 @@ async def test_get_open_pull_requests_page_limit(
     assert res is not None
     assert len(res) == 2000
     assert patched_session_get.call_count == 20, "stop calling after 20 pages"
+
+
+def commit_page(n: int, *, has_next: bool, cursor: Optional[str]) -> Dict[str, Any]:
+    node = {
+        "commit": {
+            "parents": {"totalCount": 1},
+            "author": {
+                "user": {
+                    "name": "Ada",
+                    "databaseId": 1,
+                    "login": "ada",
+                    "type": "User",
+                }
+            },
+        }
+    }
+    return {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "commits": {
+                        "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+                        "nodes": [node] * n,
+                    }
+                }
+            }
+        }
+    }
+
+
+async def test_get_all_commits_pages(api_client: Client, mocker: MockFixture) -> None:
+    """
+    Pages are fetched one after another, passing the cursor on, until the
+    last one.
+    """
+    send_query = mocker.patch.object(
+        api_client,
+        "send_query",
+        side_effect=[
+            commit_page(2, has_next=True, cursor="c1"),
+            commit_page(1, has_next=False, cursor=None),
+        ],
+    )
+    commits = await api_client.get_all_commits(pr_number=7)
+    assert commits is not None
+    assert len(commits) == 3
+    assert send_query.call_count == 2
+    assert send_query.call_args_list[0].kwargs["variables"]["cursor"] is None
+    assert send_query.call_args_list[1].kwargs["variables"]["cursor"] == "c1"
+    assert (
+        send_query.call_args_list[1].kwargs["query"] == GET_PULL_REQUEST_COMMITS_QUERY
+    )
+
+
+async def test_get_all_commits_page_limit(
+    api_client: Client, mocker: MockFixture
+) -> None:
+    """
+    A pull request with more pages than COMMIT_PAGE_LIMIT gives up with None,
+    which the evaluation reports as "cannot verify".
+    """
+    send_query = mocker.patch.object(
+        api_client,
+        "send_query",
+        side_effect=[commit_page(1, has_next=True, cursor="c")]
+        * (COMMIT_PAGE_LIMIT + 1),
+    )
+    assert await api_client.get_all_commits(pr_number=7) is None
+    assert send_query.call_count == COMMIT_PAGE_LIMIT
+
+
+async def test_get_all_commits_api_error(
+    api_client: Client, mocker: MockFixture
+) -> None:
+    """
+    A failed page gives None rather than a partial list.
+    """
+    mocker.patch.object(
+        api_client,
+        "send_query",
+        side_effect=[commit_page(1, has_next=True, cursor="c"), None],
+    )
+    assert await api_client.get_all_commits(pr_number=7) is None
+
+
+@requires_redis
+async def test_get_event_info_pages_commits(
+    api_client: Client,
+    blocked_response: Dict[str, Any],
+    mocker: MockFixture,
+    setup_redis: object,
+) -> None:
+    """
+    When the pull request has more commits than the event query carries, the
+    full list is fetched and replaces the truncated one.
+    """
+    # the event query carries one commit of three: the rest must be paged
+    blocked_response["data"]["repository"]["pullRequest"]["commitHistory"] = {
+        "totalCount": 3,
+        "nodes": commit_page(1, has_next=False, cursor=None)["data"]["repository"][
+            "pullRequest"
+        ]["commits"]["nodes"],
+    }
+    event_response = GraphQLResponse(
+        data=blocked_response.get("data"), errors=blocked_response.get("errors")
+    )
+    page = commit_page(3, has_next=False, cursor=None)
+
+    # get_event_info also queries API features and the config; answer by query
+    def respond(*, query: str, variables: object, installation_id: str) -> object:
+        return page if query == GET_PULL_REQUEST_COMMITS_QUERY else event_response
+
+    send_query = mocker.patch.object(api_client, "send_query", side_effect=respond)
+    res = await api_client.get_event_info(pr_number=100)
+    assert res is not None
+    assert res.commit_count == 3
+    assert len(res.commits) == 3
+    assert [
+        c.kwargs["query"] == GET_PULL_REQUEST_COMMITS_QUERY
+        for c in send_query.call_args_list
+    ].count(True) == 1
+
+
+def test_get_check_runs_excludes_our_own_status() -> None:
+    """
+    Kodiak's own status check must not feed back into the evaluation: with it
+    listed as a required check, one of our blocking statuses would otherwise
+    block us again on the next evaluation of the same commit.
+    """
+    pr = {
+        "commits": {
+            "nodes": [
+                {
+                    "commit": {
+                        "checkSuites": {
+                            "nodes": [
+                                {
+                                    "checkRuns": {
+                                        "nodes": [
+                                            {
+                                                "name": "ci/unit",
+                                                "conclusion": "SUCCESS",
+                                            },
+                                            {
+                                                "name": CHECK_RUN_NAME,
+                                                "conclusion": "FAILURE",
+                                            },
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            ]
+        }
+    }
+    assert [c.name for c in get_check_runs(pr=pr)] == ["ci/unit"]

@@ -32,7 +32,8 @@ from kodiak.queries.commits import (
     CommitConnection,
     GitActor,
     User as PullRequestCommitUser,
-    get_commits,
+    get_commit_history,
+    parse_commit_page,
 )
 from kodiak.redis_client import redis_web_api
 from kodiak.throttle import get_thottler_for_installation
@@ -60,6 +61,42 @@ class GraphQLResponse(TypedDict, total=False):
     data: Optional[Dict[Any, Any]]
     errors: Optional[List[GraphQLError]]
 
+
+# GitHub returns at most 100 items per list, and the event query carries the
+# last 100 commits of a pull request. For a longer one we page through them
+# all with this query, up to COMMIT_PAGE_LIMIT pages; beyond that the
+# evaluation cannot verify the commits and says so.
+COMMIT_PAGE_LIMIT = 10
+
+GET_PULL_REQUEST_COMMITS_QUERY = """
+query GetPullRequestCommits($owner: String!, $repo: String!, $PRNumber: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $PRNumber) {
+      commits(first: 100, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          commit {
+            author {
+              user {
+                databaseId
+                name
+                login
+                type: __typename
+              }
+            }
+            parents {
+              totalCount
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
 GET_CONFIG_QUERY = """
 query (
@@ -285,6 +322,7 @@ query GetEventInfo($owner: String!, $repo: String!, $PRNumber: Int!) {
         }
       }
       commitHistory: commits(last: 100) {
+        totalCount
         nodes {
           commit {
             author {
@@ -477,6 +515,8 @@ class EventInfoResponse:
     check_runs: List[CheckRun] = field(default_factory=list)
     valid_merge_methods: List[MergeMethod] = field(default_factory=list)
     commits: List[Commit] = field(default_factory=list)
+    # None when unknown; otherwise the total, of which `commits` holds the last 100
+    commit_count: Optional[int] = None
 
 
 MERGE_PR_MUTATION = """
@@ -865,9 +905,15 @@ def get_check_runs(*, pr: Dict[str, Any]) -> List[CheckRun]:
         if check_run_dict is None:
             continue
         try:
-            check_runs.append(CheckRun.parse_obj(check_run_dict))
+            check_run = CheckRun.parse_obj(check_run_dict)
         except ValueError:
             logger.warning("Could not parse CheckRun", exc_info=True)
+            continue
+        # Our own status check is output, never input: if someone makes it a
+        # required check, a blocking status of ours must not block us again.
+        if check_run.name == CHECK_RUN_NAME:
+            continue
+        check_runs.append(check_run)
     return check_runs
 
 
@@ -1166,6 +1212,47 @@ query {
             file_expression=get_file_expression(),
         )
 
+    async def get_all_commits(self, *, pr_number: int) -> Optional[List[Commit]]:
+        """
+        All commits of the pull request, in pages of 100. None if a page could
+        not be fetched or the pull request has more than COMMIT_PAGE_LIMIT
+        pages of commits.
+        """
+        log = self.log.bind(pr=pr_number)
+        commits: List[Commit] = []
+        cursor: Optional[str] = None
+        for _ in range(COMMIT_PAGE_LIMIT):
+            res = await self.send_query(
+                query=GET_PULL_REQUEST_COMMITS_QUERY,
+                variables=dict(
+                    owner=self.owner, repo=self.repo, PRNumber=pr_number, cursor=cursor
+                ),
+                installation_id=self.installation_id,
+            )
+            data = res.get("data") if res is not None else None
+            connection = None
+            if data is not None:
+                connection = (
+                    (data.get("repository") or {}).get("pullRequest") or {}
+                ).get("commits")
+            if connection is None:
+                log.warning("could not fetch pull request commits", res=res)
+                return None
+            parsed = parse_commit_page(connection=connection)
+            if parsed is None:
+                return None
+            page_commits, page_info = parsed
+            commits.extend(page_commits)
+            if not page_info.hasNextPage:
+                return commits
+            cursor = page_info.endCursor
+        log.warning(
+            "pull request has more commits than we fetch",
+            pages=COMMIT_PAGE_LIMIT,
+            fetched=len(commits),
+        )
+        return None
+
     async def get_event_info(self, pr_number: int) -> Optional[EventInfoResponse]:
         """
         Retrieve all the information we need to evaluate a pull request
@@ -1266,6 +1353,12 @@ query {
 
         all_reviews = get_reviews(pr=pull_request)
         bot_reviews = self.get_bot_reviews(reviews=all_reviews)
+        commits, commit_count = get_commit_history(pr=pull_request)
+        if commit_count is not None and commit_count > len(commits):
+            # the event query holds the last 100 commits only
+            all_commits = await self.get_all_commits(pr_number=pr_number)
+            if all_commits is not None:
+                commits = all_commits
         return EventInfoResponse(
             config=cfg.parsed,
             config_str=cfg.text,
@@ -1284,7 +1377,8 @@ query {
             review_requests=get_requested_reviews(pr=pull_request),
             bot_reviews=bot_reviews,
             status_contexts=get_status_contexts(pr=pull_request),
-            commits=get_commits(pr=pull_request),
+            commits=commits,
+            commit_count=commit_count,
             check_runs=get_check_runs(pr=pull_request),
             head_exists=get_head_exists(pr=pull_request),
             valid_merge_methods=get_valid_merge_methods(repo=repository),
@@ -1451,7 +1545,11 @@ query {
             return await self.session.patch(url, headers=headers, json=dict(sha=sha))
 
     async def create_notification(
-        self, head_sha: str, message: str, summary: Optional[str] = None
+        self,
+        head_sha: str,
+        message: str,
+        summary: Optional[str] = None,
+        conclusion: str = "neutral",
     ) -> http.Response:
         headers = await get_headers(
             session=self.session, installation_id=self.installation_id
@@ -1462,7 +1560,7 @@ query {
             head_sha=head_sha,
             status="completed",
             completed_at=datetime.now(timezone.utc).isoformat(),
-            conclusion="neutral",
+            conclusion=conclusion,
             output=dict(title=message, summary=summary or ""),
         )
         async with self.throttler:

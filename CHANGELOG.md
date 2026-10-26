@@ -9,16 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Statuses that stop a merge ("cannot merge", configuration errors) are posted as failed check runs, so they show as a red X. Other statuses stay neutral, which GitHub lists as "skipped".
 - Upgrade PyJWT from 1.x to 2.x.
 
 ### Added
 
+- Added the `merge.block_on_merge_commits` configuration option. When enabled, a pull request whose branch contains merge commits is blocked until it is rebased, keeping each pull request's history linear.
 - Added the `merge.head_of_queue_label` configuration option. When set, Kodiak keeps the label on the pull request it is currently merging, the head of its merge queue, so other systems can prioritize it.
 - Added the `update.method` configuration option. Set `update.method = "rebase"` to have Kodiak update out of date pull requests with a rebase instead of a merge commit.
 - Added support for GitHub's merge queue. When a merge queue is required for the base branch, Kodiak adds the pull request to the merge queue instead of merging it. (#927)
 
 ### Fixed
 
+- Kodiak's own status check no longer counts among a pull request's check runs, so listing it as a required check cannot make one of its blocking statuses block Kodiak itself.
 - The merge queue no longer processes a pull request a second time after merging it. Webhook events arriving during a merge used to re-enqueue the pull request being merged.
 - Handle a redacted branch protection push allowance actor. (#926)
 

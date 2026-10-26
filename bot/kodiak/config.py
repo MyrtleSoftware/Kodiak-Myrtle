@@ -95,6 +95,9 @@ class Merge(BaseModel):
     block_on_reviews_requested: bool = False
     # block merging if there are neutral required check runs.
     block_on_neutral_required_check_runs: bool = False
+    # block merging while the pull request's branch contains merge commits
+    # (commits with two parents), e.g. from merging the base branch into it.
+    block_on_merge_commits: bool = False
     # comment on merge conflict and remove automerge label
     notify_on_conflict: bool = True
     # don't wait for status checks to run before updating branch
