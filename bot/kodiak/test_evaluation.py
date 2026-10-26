@@ -2598,6 +2598,28 @@ async def test_mergeable_block_on_merge_commits() -> None:
     assert api.merge.call_count == 0
 
 
+async def test_mergeable_block_on_merge_commits_without_automerge_label() -> None:
+    """
+    The block is reported before the automerge label gate, so an author sees
+    it from the first evaluation rather than once the PR is labelled.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    pull_request = create_pull_request()
+    config.merge.block_on_merge_commits = True
+    pull_request.labels = ["bugfix"]
+    commits = [
+        create_commit(database_id=7, name="Ada", login="ada", type="User", parents=2)
+    ]
+
+    await mergeable(api=api, config=config, pull_request=pull_request, commits=commits)
+    assert api.set_status.call_count == 1
+    assert "pull request has 1 merge commit;" in api.set_status.calls[0]["msg"]
+    assert "no automerge label" not in api.set_status.calls[0]["msg"]
+    assert api.merge.call_count == 0
+
+
 async def test_mergeable_block_on_merge_commits_linear_history_merges() -> None:
     """
     With the option on and no merge commits, merging proceeds as usual.
