@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import (
     Any,
     Awaitable,
@@ -16,8 +17,9 @@ import pytest
 from typing_extensions import Protocol
 
 import kodiak.http as requests
+from kodiak import pull_request
 from kodiak.config import V1, Merge, MergeMethod, UpdateMethod
-from kodiak.errors import ApiCallException
+from kodiak.errors import ApiCallException, GitHubApiInternalServerError
 from kodiak.http import Request
 from kodiak.pull_request import PRV2, EventInfoResponse, QueueForMergeCallback
 from kodiak.queries import (
@@ -133,7 +135,12 @@ class MockMergePullRequest(BaseMockFunc):
     response: requests.Response
 
     async def __call__(
-        self, number: int, merge_method: str, commit_title: str, commit_message: str
+        self,
+        number: int,
+        merge_method: str,
+        commit_title: str,
+        commit_message: str,
+        sha: str,
     ) -> requests.Response:
         self.log_call(
             dict(
@@ -141,9 +148,18 @@ class MockMergePullRequest(BaseMockFunc):
                 merge_method=merge_method,
                 commit_title=commit_title,
                 commit_message=commit_message,
+                sha=sha,
             )
         )
         return self.response
+
+
+class MockGetMergeRequest(BaseMockFunc):
+    responses: List[requests.Response]
+
+    async def __call__(self, number: int, uuid: str) -> requests.Response:
+        self.log_call(dict(number=number, uuid=uuid))
+        return self.responses[self.call_count - 1]
 
 
 class MockDeleteLabel(BaseMockFunc):
@@ -204,6 +220,7 @@ class MockUpdateRef(BaseMockFunc):
 
 class FakeClientProtocol(Protocol):
     merge_pull_request: MockMergePullRequest
+    get_merge_request: MockGetMergeRequest
     enqueue_pull_request: MockEnqueuePullRequest
     delete_label: MockDeleteLabel
     add_label: MockAddLabel
@@ -223,6 +240,7 @@ class FakeClientProtocol(Protocol):
 def create_client() -> Type[FakeClientProtocol]:
     class FakeClient:
         merge_pull_request = MockMergePullRequest()
+        get_merge_request = MockGetMergeRequest()
         enqueue_pull_request = MockEnqueuePullRequest()
         delete_label = MockDeleteLabel()
         add_label = MockAddLabel()
@@ -274,23 +292,156 @@ def create_prv2(
     )
 
 
+def merge_request_body(status: str, uuid: str = "3d6f6cd2") -> bytes:
+    details: Dict[str, Any] = {"message": status}
+    if status == "pending":
+        details.update(
+            uuid=uuid,
+            merge_method="squash",
+            merge_action="direct_merge",
+            expected_head_sha="8d728d017cac4f5ba37533debe65730abe65730a",
+        )
+    if status == "merged":
+        details["sha"] = "6dcb09b5b57875f334f61aebed695e2e4193db5e"
+    return json.dumps(dict(status=status, details=details)).encode()
+
+
+@pytest.fixture(autouse=True)
+def no_merge_poll_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pull_request, "MERGE_POLL_RATE_SECONDS", 0)
+
+
 async def test_pr_v2_merge() -> None:
     """
-    We should be able to merge successfully
+    We should start an async merge and poll it until it has merged
     """
     client = create_client()
     client.merge_pull_request.response = create_response(
-        content=b"""{
-      "sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
-      "merged": true,
-      "message": "Pull Request successfully merged"
-    }""",
-        status_code=200,
+        content=merge_request_body("pending"), status_code=202
     )
+    client.get_merge_request.responses = [
+        create_response(content=merge_request_body("pending"), status_code=200),
+        create_response(content=merge_request_body("merged"), status_code=200),
+    ]
 
     pr_v2 = create_prv2(client=client)
     await pr_v2.merge("squash", commit_title="my title", commit_message="my message")
     assert client.merge_pull_request.call_count == 1
+    assert (
+        client.merge_pull_request.calls[0]["sha"]
+        == "8d728d017cac4f5ba37533debe65730abe65730a"
+    )
+    assert client.get_merge_request.call_count == 2
+    assert client.get_merge_request.calls[0]["uuid"] == "3d6f6cd2"
+
+
+async def test_pr_v2_merge_already_merged() -> None:
+    """
+    We shouldn't poll when GitHub reports the PR has already merged
+    """
+    client = create_client()
+    client.merge_pull_request.response = create_response(
+        content=merge_request_body("merged"), status_code=200
+    )
+    client.get_merge_request.responses = []
+
+    pr_v2 = create_prv2(client=client)
+    await pr_v2.merge("squash", commit_title="my title", commit_message="my message")
+    assert client.get_merge_request.call_count == 0
+
+
+async def test_pr_v2_merge_already_running() -> None:
+    """
+    On a 409 we should wait on the merge that is already running
+    """
+    client = create_client()
+    client.merge_pull_request.response = create_response(
+        content=merge_request_body("pending", uuid="a1b2c3"), status_code=409
+    )
+    client.get_merge_request.responses = [
+        create_response(content=merge_request_body("merged"), status_code=200),
+    ]
+
+    pr_v2 = create_prv2(client=client)
+    await pr_v2.merge("squash", commit_title="my title", commit_message="my message")
+    assert client.get_merge_request.calls[0]["uuid"] == "a1b2c3"
+
+
+async def test_pr_v2_merge_failed() -> None:
+    """
+    We should raise ApiCallException when the async merge fails
+    """
+    client = create_client()
+    client.merge_pull_request.response = create_response(
+        content=merge_request_body("pending"), status_code=202
+    )
+    client.get_merge_request.responses = [
+        create_response(content=merge_request_body("failed"), status_code=200),
+    ]
+
+    pr_v2 = create_prv2(client=client)
+    with pytest.raises(ApiCallException) as e:
+        await pr_v2.merge(
+            "squash", commit_title="my title", commit_message="my message"
+        )
+    assert e.value.method == "pull_request/merge"
+    assert b'"failed"' in e.value.response
+
+
+async def test_pr_v2_merge_poll_server_error() -> None:
+    """
+    A 500 while polling is safe to retry, unlike a 500 when starting the merge
+    """
+    client = create_client()
+    client.merge_pull_request.response = create_response(
+        content=merge_request_body("pending"), status_code=202
+    )
+    client.get_merge_request.responses = [
+        create_response(content=b"<html>Server Error</html>", status_code=500),
+    ]
+
+    pr_v2 = create_prv2(client=client)
+    with pytest.raises(ApiCallException) as e:
+        await pr_v2.merge(
+            "squash", commit_title="my title", commit_message="my message"
+        )
+    assert e.value.status_code == 500
+
+
+async def test_pr_v2_merge_start_server_error() -> None:
+    """
+    A 500 when starting the merge isn't safe to retry
+    """
+    client = create_client()
+    client.merge_pull_request.response = create_response(
+        content=b"<html>Server Error</html>", status_code=500
+    )
+
+    pr_v2 = create_prv2(client=client)
+    with pytest.raises(GitHubApiInternalServerError):
+        await pr_v2.merge(
+            "squash", commit_title="my title", commit_message="my message"
+        )
+
+
+async def test_pr_v2_merge_poll_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    We should stop waiting on a merge that doesn't finish and let it retry
+    """
+    monkeypatch.setattr(pull_request, "MERGE_POLL_TIMEOUT_SECONDS", -1)
+    client = create_client()
+    client.merge_pull_request.response = create_response(
+        content=merge_request_body("pending"), status_code=202
+    )
+    client.get_merge_request.responses = []
+
+    pr_v2 = create_prv2(client=client)
+    with pytest.raises(ApiCallException) as e:
+        await pr_v2.merge(
+            "squash", commit_title="my title", commit_message="my message"
+        )
+    assert e.value.status_code == 202
+    assert client.get_merge_request.call_count == 0
 
 
 async def test_pr_v2_merge_rebase_error() -> None:
