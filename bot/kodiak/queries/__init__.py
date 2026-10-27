@@ -1485,8 +1485,19 @@ query {
         merge_method: str,
         commit_title: Optional[str],
         commit_message: Optional[str],
+        sha: str,
     ) -> http.Response:
-        body = dict(merge_method=merge_method)
+        """
+        Start merging a pull request in the background.
+
+        The synchronous merge endpoint rejects pull requests in a stack, so we
+        use the asynchronous one. Poll the result with `get_merge_request`.
+
+        https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request-asynchronously
+        """
+        # pin the head so GitHub cancels the merge if the PR is pushed to, and
+        # merge directly so a merge queue on the base branch is never used.
+        body = dict(merge_method=merge_method, sha=sha, merge_action="direct_merge")
         # we must not pass the keys for commit_title or commit_message when they
         # are null because GitHub will error saying the title/message cannot be
         # null. When the keys are not passed, GitHub creates a title and
@@ -1498,9 +1509,24 @@ query {
         headers = await get_headers(
             session=self.session, installation_id=self.installation_id
         )
-        url = conf.v3_url(f"/repos/{self.owner}/{self.repo}/pulls/{number}/merge")
+        url = conf.v3_url(f"/repos/{self.owner}/{self.repo}/pulls/{number}/merge-async")
         async with self.throttler:
             return await self.session.put(url, headers=headers, json=body)
+
+    async def get_merge_request(self, number: int, uuid: str) -> http.Response:
+        """
+        Get the state of a merge started by `merge_pull_request`.
+
+        https://docs.github.com/en/rest/pulls/pulls
+        """
+        headers = await get_headers(
+            session=self.session, installation_id=self.installation_id
+        )
+        url = conf.v3_url(
+            f"/repos/{self.owner}/{self.repo}/pulls/{number}/merge-async/{uuid}"
+        )
+        async with self.throttler:
+            return await self.session.get(url, headers=headers)
 
     async def enqueue_pull_request(
         self, *, pull_request_id: str, expected_head_oid: str
