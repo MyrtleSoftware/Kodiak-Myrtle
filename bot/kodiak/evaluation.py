@@ -725,6 +725,21 @@ async def mergeable(
         )
         return
 
+    # the configuration can limit Kodiak to some base branches. A pull request
+    # into any other branch is left alone: no approval, update or merge. This
+    # comes before the branch protection check so the status names the
+    # configured limit rather than the branch's protection.
+    if (
+        config.merge.allowed_base_branches
+        and pull_request.baseRefName not in config.merge.allowed_base_branches
+    ):
+        log.info("base branch not in merge.allowed_base_branches")
+        await api.dequeue()
+        await set_status(
+            f"Ignored (base branch {pull_request.baseRefName!r} is not in merge.allowed_base_branches {config.merge.allowed_base_branches!r})"
+        )
+        return
+
     if branch_protection is None and not has_equivalent_branch_protection_rulesets(
         ruleset_rules
     ):

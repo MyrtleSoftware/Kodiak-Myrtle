@@ -7,6 +7,7 @@ automerge_label = "mergeit!" # default: "automerge"
 require_automerge_label = false # default: true
 blacklist_title_regex = "" # default: "^WIP:.*"
 blacklist_labels = ["wip", "block-merge"] # default: []
+allowed_base_branches = ["main", "release/v1"] # default: []
 method = "squash" # default: first valid merge method in list `"merge"`, `"squash"`, `"rebase"`
 delete_branch_on_merge = true # default: false
 block_on_reviews_requested = true # default: false
