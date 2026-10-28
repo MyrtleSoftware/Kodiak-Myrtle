@@ -9,8 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Merge through GitHub's asynchronous merge API. The synchronous endpoint rejects pull requests in a native stack ("Merging stacked PRs via this endpoint is not supported"), so Kodiak could not merge the bottom of a stack. Kodiak pins the merge to the head it evaluated, waits for the background merge to finish, and reports a merge GitHub could not complete as a `cannot merge` status with GitHub's reason.
+- A stacked pull request above the bottom of its stack is not merged, since GitHub would merge the open pull requests below it as well. It gets the status "Ignored (stacked on '...'; Kodiak merges a stack from the bottom)", shown in preference to the branch protection status, and is evaluated again once GitHub retargets it after the pull request below merges.
 - Statuses that stop a merge ("cannot merge", configuration errors) are posted as failed check runs, so they show as a red X. Other statuses stay neutral, which GitHub lists as "skipped".
-- A pull request whose base branch has no branch protection now gets the status "Ignored (base branch ... has no branch protection; Kodiak merges only into protected branches)" instead of a configuration error. Stacked pull requests above the bottom of their stack target such branches until they are retargeted.
+- A pull request whose base branch has no branch protection now gets the status "Ignored (base branch ... has no branch protection; Kodiak merges only into protected branches)" instead of a configuration error.
 - Upgrade PyJWT from 1.x to 2.x.
 
 ### Added

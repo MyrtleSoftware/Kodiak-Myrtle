@@ -227,6 +227,9 @@ query GetEventInfo($owner: String!, $repo: String!, $PRNumber: Int!) {
       isDraft
       isInMergeQueue
       isMergeQueueEnabled
+      stack {
+        baseRefName
+      }
       mergeStateStatus
       reviewDecision
       state
@@ -460,6 +463,15 @@ class ReviewThreadConnection(BaseModel):
     nodes: Optional[List[ReviewThread]]
 
 
+class PullRequestStack(BaseModel):
+    """
+    https://docs.github.com/en/graphql/reference/objects#pullrequeststack
+    """
+
+    # the branch the stack's pull requests land on.
+    baseRefName: str
+
+
 class PullRequest(BaseModel):
     id: str
     number: int
@@ -473,6 +485,8 @@ class PullRequest(BaseModel):
     isInMergeQueue: bool = False
     # whether the base branch of the pull request has a merge queue enabled.
     isMergeQueueEnabled: bool = False
+    # the stack the pull request is part of, or None when it is not stacked.
+    stack: Optional[PullRequestStack] = None
     mergeStateStatus: MergeStateStatus
     # null if the pull request does not require a review (no branch protection
     # rule). Otherwise shows if the pull request meets the branch protection
@@ -517,16 +531,6 @@ class EventInfoResponse:
     commits: List[Commit] = field(default_factory=list)
     # None when unknown; otherwise the total, of which `commits` holds the last 100
     commit_count: Optional[int] = None
-
-
-MERGE_PR_MUTATION = """
-mutation merge($PRId: ID!, $SHA: GitObjectID!, $title: String, $body: String) {
-  mergePullRequest(input: {pullRequestId: $PRId, expectedHeadOid: $SHA, commitHeadline: $title, commitBody: $body}) {
-    clientMutationId
-  }
-}
-
-"""
 
 
 ENQUEUE_PR_MUTATION = """
@@ -1485,8 +1489,21 @@ query {
         merge_method: str,
         commit_title: Optional[str],
         commit_message: Optional[str],
+        sha: str,
     ) -> http.Response:
-        body = dict(merge_method=merge_method)
+        """
+        Start merging a pull request in the background. Poll the result with
+        `get_merge_result`.
+
+        The synchronous merge endpoint rejects pull requests in a stack, so we
+        always use the asynchronous one.
+
+        https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request-asynchronously
+        """
+        # pin the head so GitHub cancels the merge if the pull request is
+        # pushed to, and merge directly so a merge queue on the base branch is
+        # never used behind Kodiak's back.
+        body = dict(merge_method=merge_method, sha=sha, merge_action="direct_merge")
         # we must not pass the keys for commit_title or commit_message when they
         # are null because GitHub will error saying the title/message cannot be
         # null. When the keys are not passed, GitHub creates a title and
@@ -1498,9 +1515,24 @@ query {
         headers = await get_headers(
             session=self.session, installation_id=self.installation_id
         )
-        url = conf.v3_url(f"/repos/{self.owner}/{self.repo}/pulls/{number}/merge")
+        url = conf.v3_url(f"/repos/{self.owner}/{self.repo}/pulls/{number}/merge-async")
         async with self.throttler:
             return await self.session.put(url, headers=headers, json=body)
+
+    async def get_merge_result(self, number: int, uuid: str) -> http.Response:
+        """
+        Get the state of a merge started by `merge_pull_request`.
+
+        https://docs.github.com/en/rest/pulls/pulls#get-the-result-of-an-asynchronous-merge
+        """
+        headers = await get_headers(
+            session=self.session, installation_id=self.installation_id
+        )
+        url = conf.v3_url(
+            f"/repos/{self.owner}/{self.repo}/pulls/{number}/merge-async/{urllib.parse.quote(uuid)}"
+        )
+        async with self.throttler:
+            return await self.session.get(url, headers=headers)
 
     async def enqueue_pull_request(
         self, *, pull_request_id: str, expected_head_oid: str
