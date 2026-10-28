@@ -24,6 +24,7 @@
         "blocking_title_regex": ":::|||kodiak|||internal|||reserved|||:::",
         "blacklist_labels": [],
         "blocking_labels": [],
+        "allowed_base_branches": [],
         "method": null,
         "delete_branch_on_merge": false,
         "block_on_reviews_requested": false,
@@ -292,6 +293,14 @@
         },
         "blocking_labels": {
           "title": "Blocking Labels",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_base_branches": {
+          "title": "Allowed Base Branches",
           "default": [],
           "type": "array",
           "items": {

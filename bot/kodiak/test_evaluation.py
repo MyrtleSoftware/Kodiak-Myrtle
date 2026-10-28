@@ -507,6 +507,83 @@ async def test_mergeable_missing_branch_protection() -> None:
     assert api.queue_for_merge.called is False
 
 
+async def test_mergeable_base_branch_not_in_base_branches() -> None:
+    """
+    With merge.allowed_base_branches set, a pull request into a branch that is not
+    listed is ignored: nothing is approved, updated or merged.
+    """
+    api = create_api()
+    config = create_config()
+    config.merge.allowed_base_branches = ["main", "release/v1"]
+    mergeable = create_mergeable()
+
+    await mergeable(api=api, config=config)
+    assert api.set_status.call_count == 1
+    assert api.dequeue.call_count == 1
+    assert (
+        api.set_status.calls[0]["msg"]
+        == "Ignored (base branch 'master' is not in merge.allowed_base_branches ['main', 'release/v1'])"
+    )
+
+    assert api.approve_pull_request.called is False
+    assert api.update_branch.called is False
+    assert api.merge.called is False
+    assert api.queue_for_merge.called is False
+
+
+async def test_mergeable_base_branch_not_in_base_branches_without_label() -> None:
+    """
+    The base branch check comes before the automerge label check, so an
+    unlabelled pull request into an unlisted branch is told about the branch,
+    not the label.
+    """
+    api = create_api()
+    config = create_config()
+    config.merge.allowed_base_branches = ["main"]
+    pull_request = create_pull_request()
+    pull_request.labels = []
+    mergeable = create_mergeable()
+
+    await mergeable(api=api, config=config, pull_request=pull_request)
+    assert api.set_status.call_count == 1
+    assert api.set_status.calls[0]["msg"].startswith(
+        "Ignored (base branch 'master' is not in merge.allowed_base_branches"
+    )
+
+
+async def test_mergeable_base_branch_not_in_base_branches_unprotected() -> None:
+    """
+    The base branch check comes before the branch protection check, so a pull
+    request into an unlisted, unprotected branch (e.g. one above the bottom of
+    a stack) is told about the configured limit.
+    """
+    api = create_api()
+    config = create_config()
+    config.merge.allowed_base_branches = ["main"]
+    mergeable = create_mergeable()
+
+    await mergeable(api=api, config=config, branch_protection=None)
+    assert api.set_status.call_count == 1
+    assert api.dequeue.call_count == 1
+    assert api.set_status.calls[0]["msg"].startswith(
+        "Ignored (base branch 'master' is not in merge.allowed_base_branches"
+    )
+
+
+async def test_mergeable_base_branch_in_base_branches() -> None:
+    """
+    A pull request into a listed base branch is handled as usual.
+    """
+    api = create_api()
+    config = create_config()
+    config.merge.allowed_base_branches = ["master", "release/v1"]
+    mergeable = create_mergeable()
+
+    await mergeable(api=api, config=config)
+    assert api.queue_for_merge.called is True
+    assert not any(call["msg"].startswith("Ignored") for call in api.set_status.calls)
+
+
 async def test_mergeable_missing_branch_protection_with_rulesets() -> None:
     """
     We don't need branch protection settings if rulesets are in use.

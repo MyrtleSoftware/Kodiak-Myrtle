@@ -82,6 +82,10 @@ class Merge(BaseModel):
     # labels to block merging of pull request
     blacklist_labels: List[str] = []  # deprecated for blocking_labels
     blocking_labels: List[str] = []
+    # base branches Kodiak acts on. When set, a pull request into any other
+    # branch is ignored: no approval, no update, no merge. Empty means every
+    # protected branch.
+    allowed_base_branches: List[str] = []
     # action to take when attempting to merge PR. An error will occur if method
     # is disabled for repository
     method: Optional[MergeMethod] = None

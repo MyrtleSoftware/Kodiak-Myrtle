@@ -187,6 +187,24 @@ merge.blocking_labels = ["wip"]
 
 > **NOTE:** `merge.blocking_labels` is a new name for `merge.blacklist_labels`. Both options behave identically.
 
+### `merge.allowed_base_branches`
+
+- **type:** `string[]`
+- **default:** `[]`
+- **options:** List of branch names
+
+Base branches Kodiak acts on. When set, Kodiak ignores a pull request into any other branch: it does not approve, update or merge it, and gives it the status `Ignored (base branch 'x' is not in merge.allowed_base_branches [...])`.
+
+By default Kodiak acts on pull requests into every branch that has branch protection. Set this when more than one branch is protected and Kodiak should merge into only some of them, for example into `main` but not into `release/*` branches.
+
+Names are matched exactly; patterns are not supported.
+
+#### example
+
+```
+merge.allowed_base_branches = ["main"]
+```
+
 ### `merge.method`
 
 - **type:** `string`
@@ -652,6 +670,10 @@ blocking_title_regex = "" # default: "^WIP:.*", options: "" (disables regex), a 
 
 # Kodiak will not merge a PR with any of these labels.
 blocking_labels = [] # default: [], options: list of label names (e.g. ["wip"])
+
+# Base branches Kodiak acts on. When set, Kodiak ignores pull requests into any
+# other branch. Empty means every branch with branch protection.
+allowed_base_branches = [] # default: [], options: list of branch names (e.g. ["main"])
 
 # Choose merge method for Kodiak to use.
 #
