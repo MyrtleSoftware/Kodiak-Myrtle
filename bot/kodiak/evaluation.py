@@ -29,6 +29,7 @@ from kodiak.dependencies import dep_versions_from_pr
 from kodiak.errors import (
     ApiCallException,
     GitHubApiInternalServerError,
+    MergeFailed,
     PollForever,
     RetryForSkippableChecks,
 )
@@ -705,14 +706,32 @@ async def mergeable(
         await api.dequeue()
         return
 
+    # GitHub merges a stacked pull request together with every open pull
+    # request below it, and Kodiak has not checked those. Only the bottom of
+    # a stack targets the stack's base branch, so that is the one to merge.
+    # This comes before the branch protection check: a pull request above the
+    # bottom targets another pull request's branch, which has no protection,
+    # and the stack is the reason worth showing. When the pull request below
+    # merges, GitHub retargets this one and sends an event, and this
+    # evaluation runs again.
+    if (
+        pull_request.stack is not None
+        and pull_request.baseRefName != pull_request.stack.baseRefName
+    ):
+        log.info("pull request above the bottom of its stack")
+        await api.dequeue()
+        await set_status(
+            f"Ignored (stacked on {pull_request.baseRefName!r}; Kodiak merges a stack from the bottom)"
+        )
+        return
+
     if branch_protection is None and not has_equivalent_branch_protection_rulesets(
         ruleset_rules
     ):
         # Not a configuration error from the pull request's point of view: a
         # branch without protection is a branch Kodiak does not merge into,
-        # e.g. the parent branch of a pull request above the bottom of a
-        # stack. When the pull request is retargeted, GitHub sends an event
-        # and this evaluation runs again.
+        # e.g. another feature branch. When the pull request is retargeted,
+        # GitHub sends an event and this evaluation runs again.
         await api.dequeue()
         await set_status(
             f"Ignored (base branch {pull_request.baseRefName!r} has no branch protection; Kodiak merges only into protected branches)"
@@ -1387,6 +1406,11 @@ branch protection requirements.
                 )
             )
             await api.create_comment(body)
+        # GitHub ran the merge in the background and could not complete it.
+        # Nothing was merged, so show the reason and wait for the next event.
+        except MergeFailed as e:
+            logger.warning("GitHub failed to merge pull request", message=e.message)
+            await block_merge(api, pull_request, f"merge failed on GitHub: {e.message}")
         else:
             await set_status("merge complete 🎉")
 

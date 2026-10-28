@@ -8,7 +8,7 @@ from toml import TomlDecodeError
 from typing_extensions import Protocol
 
 from kodiak.config import V1, MergeMethod, UpdateMethod
-from kodiak.errors import GitHubApiInternalServerError, PollForever
+from kodiak.errors import GitHubApiInternalServerError, MergeFailed, PollForever
 from kodiak.evaluation import (
     PRAPI,
     mergeable as mergeable_func,
@@ -32,6 +32,7 @@ from kodiak.queries import (
     PullRequestAllowedMergeMethods,
     PullRequestAuthor,
     PullRequestParameters,
+    PullRequestStack,
     PullRequestState,
     RepoInfo,
     RepositoryRuleset,
@@ -2754,3 +2755,112 @@ async def test_mergeable_block_on_skipped_required_check_runs_disabled() -> None
         merging=True,
     )
     assert api.merge.call_count == 1
+
+
+async def test_mergeable_merge_failed_on_github() -> None:
+    """
+    When GitHub runs the merge in the background and reports that it failed,
+    nothing was merged. Kodiak shows GitHub's reason as a blocking status and
+    dequeues the pull request. Unlike a 500, Kodiak stays enabled on it.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    api.merge.raises = MergeFailed(
+        "Merge conflict: the pull request could not be merged."
+    )
+    config.merge.require_automerge_label = False
+
+    await mergeable(api=api, config=config, merging=True)
+    assert api.merge.call_count == 1
+    assert api.set_status.call_count == 2
+    assert "attempting to merge PR" in api.set_status.calls[0]["msg"]
+    assert (
+        api.set_status.calls[1]["msg"]
+        == "🛑 cannot merge (merge failed on GitHub: Merge conflict: the pull request could not be merged.)"
+    )
+    assert api.set_status.calls[1]["conclusion"] == "failure"
+    assert api.dequeue.call_count == 1
+    assert api.add_label.call_count == 0
+    assert api.create_comment.call_count == 0
+
+
+STACKED_STATUS = (
+    "Ignored (stacked on 'feature/below'; Kodiak merges a stack from the bottom)"
+)
+
+
+def create_stacked_pull_request() -> PullRequest:
+    """
+    A pull request above the bottom of a stack: it targets another pull
+    request's branch, not the stack's base branch.
+    """
+    pull_request = create_pull_request()
+    pull_request.stack = PullRequestStack(baseRefName="master")
+    pull_request.baseRefName = "feature/below"
+    return pull_request
+
+
+async def test_mergeable_stacked_above_open_pull_request() -> None:
+    """
+    GitHub merges a stacked pull request together with every open pull request
+    below it. Only the bottom of a stack targets the stack's base branch, so a
+    pull request based on another pull request's branch is left alone, with a
+    status that says why.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+
+    await mergeable(api=api, pull_request=create_stacked_pull_request(), merging=True)
+    assert api.set_status.call_count == 1
+    assert api.set_status.calls[0]["msg"] == STACKED_STATUS
+    assert api.set_status.calls[0]["conclusion"] == "neutral"
+    assert api.dequeue.call_count == 1
+    assert api.merge.call_count == 0
+    assert api.update_branch.call_count == 0
+
+
+async def test_mergeable_stacked_above_open_pull_request_unprotected() -> None:
+    """
+    The branch a stacked pull request targets has no branch protection. The
+    stack is the reason to show, not the missing protection.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+
+    await mergeable(
+        api=api, pull_request=create_stacked_pull_request(), branch_protection=None
+    )
+    assert api.set_status.call_count == 1
+    assert api.set_status.calls[0]["msg"] == STACKED_STATUS
+    assert api.dequeue.call_count == 1
+
+
+async def test_mergeable_stacked_above_open_pull_request_without_label() -> None:
+    """
+    The stack check comes before the automerge label check, so an unlabelled
+    pull request above the bottom of a stack is told about the stack.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    pull_request = create_stacked_pull_request()
+    pull_request.labels = []
+
+    await mergeable(api=api, pull_request=pull_request)
+    assert api.set_status.call_count == 1
+    assert api.set_status.calls[0]["msg"] == STACKED_STATUS
+
+
+async def test_mergeable_bottom_of_stack_merges() -> None:
+    """
+    The bottom of a stack targets the stack's base branch and merges as usual.
+    """
+    api = create_api()
+    mergeable = create_mergeable()
+    config = create_config()
+    pull_request = create_pull_request()
+    pull_request.stack = PullRequestStack(baseRefName=pull_request.baseRefName)
+
+    await mergeable(api=api, config=config, pull_request=pull_request, merging=True)
+    assert api.merge.call_count == 1
+    assert api.set_status.calls[-1]["msg"] == "merge complete 🎉"
