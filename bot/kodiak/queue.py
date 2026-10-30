@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 import typing
@@ -14,6 +15,7 @@ import sentry_sdk
 import structlog
 import zstandard as zstd
 from pydantic import BaseModel
+from redis.exceptions import RedisError
 from typing_extensions import Literal, Protocol
 
 from kodiak import (
@@ -37,7 +39,6 @@ logger = structlog.get_logger()
 
 
 INGEST_QUEUE_NAMES = "kodiak_ingest_queue_names"
-MERGE_QUEUE_NAMES = "kodiak_merge_queue_names:v2"
 WEBHOOK_QUEUE_NAMES = "kodiak_webhook_queue_names"
 QUEUE_PUBSUB_INGEST = "kodiak:pubsub:ingest"
 
@@ -47,6 +48,11 @@ def get_ingest_queue(installation_id: int) -> str:
 
 
 RETRY_RATE_SECONDS = 2
+# How long the repo worker's merge marker lives without a refresh. The worker
+# refreshes it every third of this while it works on a pull request, so a
+# marker older than this was left by a worker that died, and nothing is
+# misled by it for longer.
+MERGE_TARGET_TTL_SECONDS = 180
 
 
 def installation_id_from_queue(queue_name: str) -> str:
@@ -303,6 +309,23 @@ async def bzpopmin_with_timeout(queue_name: str) -> Tuple[bytes, bytes, float] |
     )
 
 
+async def set_merge_target_marker(event: WebhookEvent, score: float) -> None:
+    """
+    Mark the pull request of `event` as the one its repo worker is merging
+    now. Webhook evaluations read the marker to keep their statuses from
+    overwriting the worker's, and to leave the head-of-queue label alone.
+
+    The marker expires unless it is refreshed, so one left by a worker that
+    died does not outlive it for long. `process_repo_queue` refreshes it
+    while it works and deletes it when it is done.
+    """
+    target_name = event.get_merge_target_queue_name()
+    async with redis_bot.pipeline(transaction=True) as pipe:
+        pipe.set(target_name, event.json(), ex=MERGE_TARGET_TTL_SECONDS)
+        pipe.set(target_name + ":time", str(score), ex=MERGE_TARGET_TTL_SECONDS)
+        await pipe.execute()
+
+
 async def process_webhook_event(
     webhook_queue: RedisWebhookQueue,
     queue_name: str,
@@ -399,9 +422,18 @@ async def process_repo_queue(log: structlog.BoundLogger, queue_name: str) -> Non
     _key, value, score = result
     webhook_event = WebhookEvent.parse_raw(value)
     target_name = webhook_event.get_merge_target_queue_name()
-    # mark this PR as being merged currently. we check this elsewhere to set proper status codes
-    await redis_bot.set(target_name, webhook_event.json())
-    await redis_bot.set(target_name + ":time", str(score))
+    await set_merge_target_marker(webhook_event, score)
+
+    async def keep_marker_alive() -> NoReturn:
+        while True:
+            await asyncio.sleep(MERGE_TARGET_TTL_SECONDS / 3)
+            # A failed refresh is not fatal: the marker only has to outlive
+            # the gap, and the merge goes on regardless. Only cancellation,
+            # from the teardown below, ends this task.
+            try:
+                await set_merge_target_marker(webhook_event, score)
+            except RedisError:
+                log.warning("failed to refresh merge marker", exc_info=True)
 
     async def dequeue() -> None:
         await redis_bot.zrem(webhook_event.get_merge_queue_name(), webhook_event.json())
@@ -441,6 +473,7 @@ async def process_repo_queue(log: structlog.BoundLogger, queue_name: str) -> Non
             return
         await pr.set_head_of_queue_label(present=present)
 
+    heartbeat = asyncio.create_task(keep_marker_alive())
     try:
         await set_head_of_queue_label(present=True)
         log.info("evaluate PR for merging")
@@ -457,8 +490,11 @@ async def process_repo_queue(log: structlog.BoundLogger, queue_name: str) -> Non
             log=log,
         )
     finally:
-        # Also on an exception: a marker that outlives its processing would
-        # keep this PR out of the merge queue (see enqueue_for_repo).
+        # Also on an exception. Until the marker goes, webhook evaluations
+        # of this PR post no status and leave its head-of-queue label on.
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
         try:
             await set_head_of_queue_label(present=False)
         finally:
@@ -513,19 +549,22 @@ class RedisWebhookQueue:
         ] = {}  # type: ignore [assignment]
 
     async def create(self) -> None:
-        # restart repo workers
-        merge_queues, webhook_queues = await asyncio.gather(
-            redis_bot.smembers(MERGE_QUEUE_NAMES),
-            redis_bot.smembers(WEBHOOK_QUEUE_NAMES),
-        )
-        for merge_result in merge_queues:
-            queue_name = merge_result.decode()
-            # Nothing is being merged when we start. A marker left by a crash
-            # would keep its PR out of the queue (see enqueue_for_repo).
-            await redis_bot.delete(queue_name + ":target", queue_name + ":target:time")
-            self.start_repo_worker(queue_name=queue_name)
+        # Restart the workers. The merge queues are found by scanning: the
+        # set that once listed them has not been written since the
+        # per-installation sets replaced it, so a restart used to leave
+        # queued pull requests waiting for the next enqueue to start their
+        # worker. Nothing is being merged when we start, so a merge marker
+        # found here was left by a worker that died: remove it now rather
+        # than wait for it to expire.
+        async for key in redis_bot.scan_iter(match="merge_queue:*"):
+            queue_name = key.decode()
+            if queue_name.endswith((":target", ":target:time")):
+                logger.info("remove stale merge marker", key=queue_name)
+                await redis_bot.delete(queue_name)
+            elif await redis_bot.zcard(queue_name) > 0:
+                self.start_repo_worker(queue_name=queue_name)
 
-        for webhook_result in webhook_queues:
+        for webhook_result in await redis_bot.smembers(WEBHOOK_QUEUE_NAMES):
             queue_name = webhook_result.decode()
             self.start_webhook_worker(queue_name=queue_name)
 
@@ -589,31 +628,21 @@ class RedisWebhookQueue:
     ) -> Optional[int]:
         """
         1. get the corresponding repo queue for event
-        2. add key to MERGE_QUEUE_NAMES so on restart we can recreate the
-        worker for the queue.
-        3. add event
+        2. record the queue name in the installation's set, for dashboards
+        3. add event, keeping its position if it is already queued
         4. start worker (will create new worker if one does not exist)
+
+        Webhook events during a merge bring the pull request being merged
+        through here too, and it re-enters the queue behind the others. The
+        repo worker pops it a second time after the merge and the merging
+        evaluation dequeues it as merged, without touching the head-of-queue
+        label. That costs one evaluation per merge. Refusing it here, by
+        reading the worker's merge marker, made the marker a lock, and one
+        left by a dead worker kept its pull request out of the queue.
 
         returns position of event in queue
         """
         queue_name = get_merge_queue_name(event)
-        # The PR the repo worker is merging right now must not re-enter the
-        # queue behind itself: it would be popped a second time after the
-        # merge, only to be dequeued as merged. Read the worker's marker here,
-        # at enqueue time; the is_active_merging flag an evaluation carries
-        # was read before its GitHub fetch and can be stale by now.
-        if (
-            await redis_bot.get(event.get_merge_target_queue_name())
-            == event.json().encode()
-        ):
-            logger.info(
-                "PR is being merged, not re-enqueuing",
-                owner=event.repo_owner,
-                repo=event.repo_name,
-                number=event.pull_request_number,
-                install=event.installation_id,
-            )
-            return 0
         async with redis_bot.pipeline(transaction=True) as pipe:
             merge_queues_by_install = f"merge_queue_by_install:{event.installation_id}"
             pipe.sadd(merge_queues_by_install, queue_name)
