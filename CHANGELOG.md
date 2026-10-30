@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Kodiak's own status check no longer counts among a pull request's check runs, so listing it as a required check cannot make one of its blocking statuses block Kodiak itself.
-- The merge queue no longer processes a pull request a second time after merging it. Webhook events arriving during a merge used to re-enqueue the pull request being merged.
+- A pull request no longer gets stuck outside the merge queue after the worker is restarted while merging it. The worker marks the pull request it is merging; that marker now expires unless the worker keeps refreshing it, and any marker found at startup is removed. Pull requests still waiting in a merge queue when the worker starts are picked up at once, instead of when the next pull request is queued behind them. As before, webhook events during a merge may re-queue the pull request being merged; the second pass finds it merged and drops it without touching the head-of-queue label.
 - Handle a redacted branch protection push allowance actor. (#926)
 
 ## 0.60.0 - 2026-05-02
