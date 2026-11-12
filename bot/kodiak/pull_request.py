@@ -34,7 +34,7 @@ logger = structlog.get_logger()
 
 
 RETRY_RATE_SECONDS = 2
-POLL_RATE_SECONDS = 3
+POLL_RATE_SECONDS = 15
 MERGE_POLL_RATE_SECONDS = 2
 # merging runs inside the 60 second evaluation timeout, so we stop waiting well
 # before it and let the retry pick the merge up again. GitHub answers the retry
