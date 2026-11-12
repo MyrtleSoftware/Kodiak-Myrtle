@@ -4,6 +4,7 @@ Accept webhooks from GitHub and add them to the Redis queues.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 from typing import Any
@@ -23,6 +24,7 @@ from kodiak.logging import configure_logging
 from kodiak.queue import INGEST_QUEUE_NAMES, QUEUE_PUBSUB_INGEST, get_ingest_queue
 from kodiak.redis_client import redis_bot
 from kodiak.schemas import RawWebhookEvent
+from kodiak.startup_refresh import refresh_pull_requests_with_retry
 
 configure_logging()
 
@@ -81,11 +83,18 @@ async def github_webhook_event(request: Request) -> Response:
         log.warning("unexpected_event_skipped")
         return JSONResponse({"ok": True})
 
+    await enqueue_event(installation_id, github_event, event)
+    return JSONResponse({"ok": True})
+
+
+async def enqueue_event(
+    installation_id: int, event_name: str, payload: dict[str, Any]
+) -> None:
     ingest_queue = get_ingest_queue(installation_id)
 
     await redis_bot.rpush(
         ingest_queue,
-        RawWebhookEvent(event_name=github_event, payload=event).json(),
+        RawWebhookEvent(event_name=event_name, payload=payload).json(),
     )
 
     # workers pop from the head, so drop the oldest events when the queue is full.
@@ -95,8 +104,28 @@ async def github_webhook_event(request: Request) -> Response:
         QUEUE_PUBSUB_INGEST,
         PubsubIngestQueueSchema(installation_id=installation_id).json(),
     )
-    return JSONResponse({"ok": True})
+
+
+async def refresh_when_serving(server: uvicorn.Server) -> None:
+    """
+    Look for pull requests whose webhooks we missed while we were down. Wait
+    until uvicorn has bound its socket: from then on, GitHub's webhooks reach
+    us, so the scan misses nothing.
+    """
+    while not server.started:
+        await asyncio.sleep(0.1)
+    await refresh_pull_requests_with_retry(enqueue_event)
+
+
+async def serve(server: uvicorn.Server) -> None:
+    refresh = asyncio.create_task(refresh_when_serving(server))
+    try:
+        await server.serve()
+    finally:
+        refresh.cancel()
 
 
 if __name__ == "__main__":
-    uvicorn.run("kodiak.entrypoints.ingest:app", host="0.0.0.0", port=conf.PORT)
+    server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=conf.PORT))
+    server.config.setup_event_loop()
+    asyncio.run(serve(server))
