@@ -6,7 +6,7 @@ sidebar_label: Quick Start
 
 1.  Install [the GitHub app](https://github.com/marketplace/kodiakhq#pricing-and-setup)
 
-2.  Create a `.kodiak.toml` file in the root of your repository with the following contents
+2.  Create a `.kodiak.toml` file in the root of your repository, on the default branch, with the following contents
 
     ```toml
     # .kodiak.toml

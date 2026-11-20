@@ -24,7 +24,6 @@ we queue every pull request with a label, and the evaluation decides.
 from __future__ import annotations
 
 import asyncio
-import collections
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict
 
 import structlog
@@ -151,19 +150,27 @@ async def get_repository_events(
     """
     owner: str = repository["owner"]["login"]
     name: str = repository["name"]
-    pull_requests_by_base: dict[str, list[Any]] = collections.defaultdict(list)
+    default_branch: str | None = repository.get("default_branch")
+    if default_branch is None:
+        # Not expected. As `get_event_info` does, we treat this as a
+        # repository without a configuration file.
+        logger.warning(
+            "could not find default branch",
+            install=installation_id,
+            owner=owner,
+            repo=name,
+        )
+    pull_requests: list[Any] = []
     async for page in _get_pages(
         http,
         conf.v3_url(f"/repos/{owner}/{name}/pulls?state=open&per_page=100"),
         headers,
         installation_id=installation_id,
     ):
-        for pull_request in page:
-            pull_requests_by_base[pull_request["base"]["ref"]].append(pull_request)
-    if not pull_requests_by_base:
+        pull_requests.extend(page)
+    if not pull_requests:
         return []
 
-    events: list[dict[str, Any]] = []
     async with Client(owner=owner, repo=name, installation_id=installation_id) as api:
         if owner not in org_default_branches:
             res = await api.send_query(
@@ -174,27 +181,24 @@ async def get_repository_events(
             org_default_branches[owner] = get_org_config_default_branch(
                 (res or {}).get("data") or {}
             )
-        for base, pull_requests in pull_requests_by_base.items():
-            # The evaluation reads the configuration from the base branch.
-            # None means that there is no configuration or that we could not
-            # read it. We cannot tell which, so we let the evaluation decide.
-            cfg = await api.get_config_for_ref(
-                ref=base, org_repo_default_branch=org_default_branches[owner]
-            )
-            config = (
-                cfg.parsed if cfg is not None and isinstance(cfg.parsed, V1) else None
-            )
-            events.extend(
-                dict(
-                    installation=dict(id=int(installation_id)),
-                    number=pull_request["number"],
-                    pull_request=dict(base=dict(ref=base)),
-                    repository=dict(name=name, owner=dict(login=owner)),
-                )
-                for pull_request in pull_requests
-                if should_evaluate(config, pull_request)
-            )
-    return events
+        # `get_event_info` reads the configuration from the default branch.
+        # None means that there is no configuration or that we could not
+        # read it. We cannot tell which, so we let `get_event_info` decide.
+        cfg = await api.get_config_for_ref(
+            ref=default_branch,
+            org_repo_default_branch=org_default_branches[owner],
+        )
+    config = cfg.parsed if cfg is not None and isinstance(cfg.parsed, V1) else None
+    return [
+        dict(
+            installation=dict(id=int(installation_id)),
+            number=pull_request["number"],
+            pull_request=dict(base=dict(ref=pull_request["base"]["ref"])),
+            repository=dict(name=name, owner=dict(login=owner)),
+        )
+        for pull_request in pull_requests
+        if should_evaluate(config, pull_request)
+    ]
 
 
 async def refresh_pull_requests(enqueue: EnqueueEvent) -> None:

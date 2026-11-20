@@ -42,12 +42,15 @@ def pull_request(
     )
 
 
-def repository(name: str, archived: bool = False) -> dict[str, Any]:
+def repository(
+    name: str, archived: bool = False, default_branch: Optional[str] = "main"
+) -> dict[str, Any]:
     return dict(
         name=name,
         full_name=f"acme/{name}",
         owner=dict(login="acme"),
         archived=archived,
+        default_branch=default_branch,
     )
 
 
@@ -102,10 +105,11 @@ def test_should_evaluate(cfg: V1 | None, pr: dict[str, Any], expected: bool) -> 
     assert should_evaluate(cfg, pr) is expected
 
 
-async def test_refresh_pull_requests(mocker: MockFixture) -> None:
+async def test_refresh_pull_requests(mocker: MockFixture, caplog: Any) -> None:
     """
-    Each base branch is filtered by its own configuration, in every
-    installation and across pages. Archived repositories are skipped, and a
+    Each repository is filtered by the configuration on its default branch,
+    whatever the base branch of the pull request, in every installation and
+    across pages. Archived repositories are skipped, and a
     failing installation does not stop the others, but makes the refresh
     raise at the end so that it is tried again.
     """
@@ -120,6 +124,10 @@ async def test_refresh_pull_requests(mocker: MockFixture) -> None:
                 repositories=[
                     repository("widgets"),
                     repository("quiet"),
+                    repository("bare", default_branch="develop"),
+                    # Only the organization's configuration is read, with
+                    # a warning.
+                    repository("branchless", default_branch=None),
                     repository("old", True),
                 ]
             ),
@@ -136,9 +144,18 @@ async def test_refresh_pull_requests(mocker: MockFixture) -> None:
         "/repos/acme/widgets/pulls?page=2": (
             [
                 pull_request(4, ["bug", "ready for merge"]),
-                pull_request(5, ["bug"], base="unconfigured"),
-                pull_request(6, [], base="unconfigured"),
+                pull_request(5, ["ready for merge"], base="release"),
+                pull_request(6, ["bug"], base="release"),
             ],
+            None,
+        ),
+        # No configuration: any label could be the automerge label.
+        "/repos/acme/bare/pulls": (
+            [pull_request(7, ["bug"]), pull_request(8, [])],
+            None,
+        ),
+        "/repos/acme/branchless/pulls": (
+            [pull_request(9, ["automerge"]), pull_request(10, ["bug"])],
             None,
         ),
         "/repos/acme/quiet/pulls": ([], None),
@@ -182,14 +199,16 @@ async def test_refresh_pull_requests(mocker: MockFixture) -> None:
 
     mocker.patch("kodiak.startup_refresh.get_headers", fake_get_headers)
 
-    configs = {
+    configs: Dict[Optional[str], CfgInfo] = {
         "main": CfgInfo(
             parsed=config('merge.automerge_label = "ready for merge"'),
             text="",
             file_expression="",
         ),
+        # the configuration in the organization's `.github` repository
+        None: CfgInfo(parsed=config(""), text="", file_expression=""),
     }
-    config_requests: List[tuple[str, str, Optional[str]]] = []
+    config_requests: List[tuple[str, Optional[str], Optional[str]]] = []
 
     class FakeClient:
         def __init__(self, *, owner: str, repo: str, installation_id: str) -> None:
@@ -207,7 +226,7 @@ async def test_refresh_pull_requests(mocker: MockFixture) -> None:
             )
 
         async def get_config_for_ref(
-            self, *, ref: str, org_repo_default_branch: str | None
+            self, *, ref: str | None, org_repo_default_branch: str | None
         ) -> CfgInfo | None:
             config_requests.append((self.repo, ref, org_repo_default_branch))
             return configs.get(ref)
@@ -224,7 +243,17 @@ async def test_refresh_pull_requests(mocker: MockFixture) -> None:
     with pytest.raises(RefreshIncomplete):
         await refresh_pull_requests(enqueue)
 
-    assert [installation_id for installation_id, _, _ in enqueued] == [1] * 3 + [3] * 3
+    assert [installation_id for installation_id, _, _ in enqueued] == [1] * 5 + [3] * 5
+    assert (
+        len(
+            [
+                msg
+                for _mod, _level, msg in caplog.record_tuples
+                if "could not find default branch" in msg and "branchless" in msg
+            ]
+        )
+        == 2
+    )
     # The worker handles the events as it handles webhooks from GitHub.
     queue = FakeQueue()
     for _, event_name, payload in enqueued:
@@ -235,10 +264,14 @@ async def test_refresh_pull_requests(mocker: MockFixture) -> None:
     ] == [
         ("1", 1, "main"),
         ("1", 4, "main"),
-        ("1", 5, "unconfigured"),
+        ("1", 5, "release"),
+        ("1", 7, "main"),
+        ("1", 9, "main"),
         ("3", 1, "main"),
         ("3", 4, "main"),
-        ("3", 5, "unconfigured"),
+        ("3", 5, "release"),
+        ("3", 7, "main"),
+        ("3", 9, "main"),
     ]
     assert queue.events[0] == WebhookEvent(
         repo_owner="acme",
@@ -248,14 +281,15 @@ async def test_refresh_pull_requests(mocker: MockFixture) -> None:
         target_name="main",
     )
     # Every REST request goes through the throttler of its installation.
-    assert throttled == ["kodiak"] * 2 + ["1"] * 4 + ["2"] + ["3"] * 4
-    # One configuration read per base branch, none for a repository without
-    # open pull requests.
+    assert throttled == ["kodiak"] * 2 + ["1"] * 6 + ["2"] + ["3"] * 6
+    # One configuration read per repository, from its default branch, and
+    # none for a repository without open pull requests.
     assert (
         config_requests
         == [
             ("widgets", "main", "trunk"),
-            ("widgets", "unconfigured", "trunk"),
+            ("bare", "develop", "trunk"),
+            ("branchless", None, "trunk"),
         ]
         * 2
     )

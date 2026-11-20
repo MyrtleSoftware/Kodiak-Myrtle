@@ -102,8 +102,8 @@ GET_CONFIG_QUERY = """
 query (
     $owner: String!,
     $repo: String!,
-    $rootConfigFileExpression: String!,
-    $githubConfigFileExpression: String!,
+    $rootConfigFileExpression: String,
+    $githubConfigFileExpression: String,
     $orgRootConfigFileExpression: String,
     $orgGithubConfigFileExpression: String
   ) {
@@ -206,6 +206,9 @@ def get_event_info_query(
     return """
 query GetEventInfo($owner: String!, $repo: String!, $PRNumber: Int!) {
   repository(owner: $owner, name: $repo) {
+    defaultBranchRef {
+      name
+    }
     mergeCommitAllowed
     rebaseMergeAllowed
     squashMergeAllowed
@@ -390,6 +393,13 @@ query GetEventInfo($owner: String!, $repo: String!, $PRNumber: Int!) {
         else "",
         bodyHTMLQuery="bodyHTML" if fetch_body_html else "bodyHTML: body",
     )
+
+
+def get_default_branch(*, repo: dict[Any, Any]) -> str | None:
+    try:
+        return cast(Union[str, None], repo["defaultBranchRef"]["name"])
+    except (KeyError, TypeError):
+        return None
 
 
 def get_org_config_default_branch(data: dict[Any, Any]) -> str | None:
@@ -1159,10 +1169,20 @@ query {
         )
 
     async def get_config_for_ref(
-        self, *, ref: str, org_repo_default_branch: str | None
+        self, *, ref: str | None, org_repo_default_branch: str | None
     ) -> CfgInfo | None:
-        repo_root_config_expression = create_root_config_file_expression(branch=ref)
-        repo_github_config_expression = create_github_config_file_expression(branch=ref)
+        """
+        The configuration at `ref` of the repository or, if there is none,
+        in the organization's `.github` repository. Without a `ref`, only the
+        `.github` repository is read.
+        """
+        repo_root_config_expression: str | None = None
+        repo_github_config_expression: str | None = None
+        if ref is not None:
+            repo_root_config_expression = create_root_config_file_expression(branch=ref)
+            repo_github_config_expression = create_github_config_file_expression(
+                branch=ref
+            )
         org_root_config_expression: str | None = None
         org_github_config_file_expression: str | None = None
 
@@ -1199,8 +1219,10 @@ query {
         def get_file_expression() -> str:
             assert parsed_config is not None
             if parsed_config.kind == "repo_root":
+                assert repo_root_config_expression is not None
                 return repo_root_config_expression
             if parsed_config.kind == "repo_github":
+                assert repo_github_config_expression is not None
                 return repo_github_config_expression
             if parsed_config.kind == "org_root":
                 assert org_root_config_expression is not None
@@ -1345,8 +1367,16 @@ query {
             log.warning("Could not parse pull request")
             return None
 
+        # The configuration comes from the default branch, so that all the
+        # pull requests of a repository use the same one, whatever their
+        # base branch.
+        default_branch = get_default_branch(repo=repository)
+        if default_branch is None:
+            # Not expected for a repository that has a pull request. We treat
+            # it as a repository without a configuration file.
+            log.warning("could not find default branch")
         cfg = await self.get_config_for_ref(
-            ref=pr.baseRefName, org_repo_default_branch=org_repo_default_branch
+            ref=default_branch, org_repo_default_branch=org_repo_default_branch
         )
         if cfg is None:
             log.info("no config found")

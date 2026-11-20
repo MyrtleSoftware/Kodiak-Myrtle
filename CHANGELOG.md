@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A stacked pull request above the bottom of its stack is not merged, since GitHub would merge the open pull requests below it as well. It gets the status "Ignored (stacked on '...'; Kodiak merges a stack from the bottom)", shown in preference to the branch protection status, and is evaluated again once GitHub retargets it after the pull request below merges.
 - Statuses that stop a merge ("cannot merge", configuration errors) are posted as failed check runs, so they show as a red X. Other statuses stay neutral, which GitHub lists as "skipped".
 - A pull request whose base branch has no branch protection now gets the status "Ignored (base branch ... has no branch protection; Kodiak merges only into protected branches)" instead of a configuration error.
+- Kodiak reads its configuration file from the repository's default branch, not from the base branch of each pull request. All the pull requests of a repository now use the same configuration, and a configuration file on another branch has no effect.
 - Upgrade PyJWT from 1.x to 2.x.
 
 ### Added
