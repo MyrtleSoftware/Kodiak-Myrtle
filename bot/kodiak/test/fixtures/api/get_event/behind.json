@@ -1,6 +1,9 @@
 {
   "data": {
     "repository": {
+      "defaultBranchRef": {
+        "name": "master"
+      },
       "mergeCommitAllowed": false,
       "rebaseMergeAllowed": false,
       "squashMergeAllowed": true,

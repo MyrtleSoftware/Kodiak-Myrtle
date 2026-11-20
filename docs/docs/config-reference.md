@@ -5,12 +5,14 @@ title: Configuration Reference
 
 Kodiak's configuration file is a TOML file and should be placed at `.kodiak.toml` (repository root) or `.github/.kodiak.toml`.
 
+Kodiak reads the configuration file from the repository's default branch. The same configuration applies to every pull request in the repository, whatever its base branch. A configuration file on another branch has no effect, so a change to the configuration applies only after it is on the default branch.
+
 If Kodiak cannot find configuration in your repository, Kodiak will look in your `.github` repository. Kodiak must be installed on your `.github` repository to read from it.
 
 For Kodiak to run on a pull request:
 
 1. Kodiak must be installed on the repository.
-2. A configuration file must exist in the repository.
+2. A configuration file must exist on the default branch of the repository, or in your `.github` repository.
 3. GitHub branch protection must exist on the target branch.
 
 ## configuration fields

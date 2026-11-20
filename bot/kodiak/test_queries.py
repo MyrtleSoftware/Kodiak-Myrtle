@@ -4,7 +4,15 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncGenerator, Dict, Iterable, Iterator, Optional, cast
+from typing import (
+    Any,
+    AsyncGenerator,
+    Dict,
+    Iterable,
+    Iterator,
+    Optional,
+    cast,
+)
 
 import pytest
 from pytest_mock import MockFixture
@@ -15,6 +23,7 @@ from kodiak.http import Request, Response
 from kodiak.queries import (
     CHECK_RUN_NAME,
     COMMIT_PAGE_LIMIT,
+    GET_CONFIG_QUERY,
     GET_PULL_REQUEST_COMMITS_QUERY,
     UPDATE_PR_BRANCH_MUTATION,
     BranchProtectionRule,
@@ -353,6 +362,73 @@ async def test_get_event_info_blocked(
         (mod, level, msg_to_dict(msg)["event"])
         for mod, level, msg in caplog.record_tuples
     ] == EXPECTED_ERRORS
+
+
+@requires_redis
+@pytest.mark.parametrize("default_branch", ("main", None))
+async def test_get_event_info_config_from_default_branch(
+    api_client: Client,
+    blocked_response: Dict[str, Any],
+    mocker: MockFixture,
+    setup_redis: object,
+    caplog: Any,
+    default_branch: Optional[str],
+) -> None:
+    """
+    The configuration is read from the repository's default branch, not from
+    the base branch of the pull request. A repository without a default
+    branch is treated as one without a configuration file, with a warning:
+    only the organization's `.github` repository is read.
+    """
+    caplog.set_level(logging.WARNING)
+    blocked_response["data"]["repository"]["defaultBranchRef"] = (
+        dict(name=default_branch) if default_branch is not None else None
+    )
+    blocked_response["data"]["orgConfigRepo"] = dict(
+        defaultBranchRef=dict(name="trunk")
+    )
+    org_config_response = dict(
+        repository=dict(rootConfigFile=None, githubConfigFile=None),
+        orgConfigRepo=dict(
+            rootConfigFile=dict(text="version = 1"), githubConfigFile=None
+        ),
+    )
+
+    async def fake_send_query(
+        *, query: str, variables: Dict[str, Any], installation_id: str
+    ) -> GraphQLResponse:
+        if query == GET_CONFIG_QUERY and variables["rootConfigFileExpression"] is None:
+            return GraphQLResponse(data=org_config_response, errors=None)
+        return GraphQLResponse(
+            data=blocked_response.get("data"), errors=blocked_response.get("errors")
+        )
+
+    send_query = mocker.patch.object(
+        api_client, "send_query", side_effect=fake_send_query
+    )
+    res = await api_client.get_event_info(pr_number=100)
+    config_queries = [
+        call.kwargs["variables"]
+        for call in send_query.call_args_list
+        if call.kwargs["query"] == GET_CONFIG_QUERY
+    ]
+    warned = any(
+        "could not find default branch" in msg
+        for _mod, _level, msg in caplog.record_tuples
+    )
+    assert res is not None
+    assert res.pull_request.baseRefName == "master"
+    if default_branch is None:
+        assert res.config_file_expression == "trunk:.kodiak.toml"
+        assert len(config_queries) == 1
+        assert config_queries[0]["rootConfigFileExpression"] is None
+        assert config_queries[0]["githubConfigFileExpression"] is None
+        assert warned
+        return
+    assert res.config_file_expression == "main:.kodiak.toml"
+    assert len(config_queries) == 1
+    assert config_queries[0]["rootConfigFileExpression"] == "main:.kodiak.toml"
+    assert not warned
 
 
 @requires_redis
