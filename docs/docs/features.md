@@ -99,6 +99,8 @@ Kodiak can delete branches on merge when [`merge.delete_branch_on_merge`](config
 
 By default, if a pull request encounters a merge conflict with the [`merge.automerge_label`](config-reference.md#mergeautomerge_label) applied, Kodiak will comment on the PR about the merge conflict and remove the automerge label. This can be turned off by disabling [`merge.notify_on_conflict`](config-reference.md#mergenotify_on_conflict).
 
+Kodiak does the same for a rebase conflict, which can occur when [`update.method = "rebase"`](config-reference.md#updatemethod) is configured. For a rebase conflict, `merge.notify_on_conflict` only turns off the comment: Kodiak always removes the automerge label.
+
 ## Approving Pull Requests
 
 Kodiak can approve PRs with [`approve.auto_approve_usernames`](config-reference.md#approveauto_approve_usernames).

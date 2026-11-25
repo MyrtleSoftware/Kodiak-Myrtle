@@ -31,6 +31,7 @@ from kodiak.errors import (
     GitHubApiInternalServerError,
     MergeFailed,
     PollForever,
+    RebaseConflict,
     RetryForSkippableChecks,
 )
 from kodiak.messages import (
@@ -346,6 +347,45 @@ async def cfg_err(
 async def block_merge(api: PRAPI, pull_request: PullRequest, msg: str) -> None:
     await api.dequeue()
     await api.set_status(f"🛑 cannot merge ({msg})", conclusion=BLOCKING)
+
+
+async def update_branch(
+    api: PRAPI,
+    config: V1,
+    pull_request: PullRequest,
+    pull_request_automerge_labels: Set[str],
+) -> bool:
+    """
+    Returns False if a rebase conflict prevents the update. The pull request
+    is then blocked, so the caller must stop the evaluation.
+    """
+    try:
+        await api.update_branch(update_method=config.update.method)
+    except RebaseConflict:
+        # A branch can merge cleanly and still conflict in a rebase, so the
+        # merge conflict check does not find this.
+        await block_merge(api, pull_request, "rebase conflict")
+        if config.merge.require_automerge_label and pull_request_automerge_labels:
+            # Unlike for a merge conflict, we remove the label without
+            # `merge.notify_on_conflict` too. Only this update call finds a
+            # rebase conflict, so a PR that keeps its label enters the merge
+            # queue again on its next webhook event, and each pass through
+            # the queue changes `merge.head_of_queue_label`, which sends that
+            # event. We cannot remember the conflict in place of this: a
+            # rebase of another PR in the same stack can remove it.
+            await asyncio.gather(
+                *[api.remove_label(label) for label in pull_request_automerge_labels]
+            )
+            if config.merge.notify_on_conflict:
+                automerge_label = config.merge.automerge_label
+                body = textwrap.dedent(
+                    f"""
+                This PR currently has a rebase conflict. Please resolve this and then re-add the `{automerge_label}` label.
+                """
+                )
+                await api.create_comment(body)
+        return False
+    return True
 
 
 def missing_branch_protection_push_allowance(
@@ -945,7 +985,7 @@ async def mergeable(
             "🔄 updating branch",
             markdown_content="branch updated because `update.always = true` is configured.",
         )
-        await api.update_branch(update_method=config.update.method)
+        await update_branch(api, config, pull_request, pull_request_automerge_labels)
         return
 
     # Before the automerge label gate on purpose: the remedy is the author's
@@ -1271,7 +1311,10 @@ async def mergeable(
                 "🔄 updating branch",
                 markdown_content="branch updated because `merge.update_branch_immediately = true` is configured.",
             )
-            await api.update_branch(update_method=config.update.method)
+            if not await update_branch(
+                api, config, pull_request, pull_request_automerge_labels
+            ):
+                return
             if merging:
                 raise PollForever
             return
@@ -1281,7 +1324,10 @@ async def mergeable(
             if config.merge.optimistic_updates:
                 if need_branch_update:
                     await set_status("⛴ merging PR (updating branch)")
-                    await api.update_branch(update_method=config.update.method)
+                    if not await update_branch(
+                        api, config, pull_request, pull_request_automerge_labels
+                    ):
+                        return
                     raise PollForever
                 if wait_for_checks:
                     await set_status(
@@ -1298,7 +1344,10 @@ async def mergeable(
                     raise PollForever
                 if need_branch_update:
                     await set_status("⛴ merging PR (updating branch)")
-                    await api.update_branch(update_method=config.update.method)
+                    if not await update_branch(
+                        api, config, pull_request, pull_request_automerge_labels
+                    ):
+                        return
                     raise PollForever
 
         # if we reach this point and we don't need to wait for checks or update a branch

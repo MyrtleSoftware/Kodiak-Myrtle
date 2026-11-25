@@ -8,7 +8,13 @@ from toml import TomlDecodeError
 from typing_extensions import Protocol
 
 from kodiak.config import V1, MergeMethod, UpdateMethod
-from kodiak.errors import GitHubApiInternalServerError, MergeFailed, PollForever
+from kodiak.errors import (
+    ApiCallException,
+    GitHubApiInternalServerError,
+    MergeFailed,
+    PollForever,
+    RebaseConflict,
+)
 from kodiak.evaluation import (
     PRAPI,
     mergeable as mergeable_func,
@@ -168,8 +174,12 @@ class MockQueueForMerge(BaseMockFunc):
 
 
 class MockUpdateBranch(BaseMockFunc):
+    raises: Optional[Union[Type[Exception], Exception]] = None
+
     async def __call__(self, *, update_method: UpdateMethod) -> None:
         self.log_call(dict(update_method=update_method))
+        if self.raises is not None:
+            raise self.raises
 
 
 class MockApprovePullRequest(BaseMockFunc):
@@ -2068,6 +2078,218 @@ async def test_mergeable_update_branch_rebase_method_while_merging() -> None:
     assert api.update_branch.call_count == 1
     assert api.update_branch.calls[0]["update_method"] == UpdateMethod.rebase
     assert api.merge.called is False
+
+
+async def test_mergeable_update_branch_rebase_conflict() -> None:
+    """
+    A retry of a rebase conflict gives the same answer, so we should block the
+    PR. If configured, we should leave a comment and remove the automerge
+    label.
+    """
+    mergeable = create_mergeable()
+    api = create_api()
+    pull_request = create_pull_request()
+    config = create_config()
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+    config.update.always = True
+    config.update.method = UpdateMethod.rebase
+    config.merge.notify_on_conflict = True
+    config.merge.require_automerge_label = True
+    api.update_branch.raises = RebaseConflict
+    await mergeable(api=api, config=config, pull_request=pull_request)
+
+    assert api.update_branch.call_count == 1
+    assert api.dequeue.call_count == 1
+    assert api.set_status.call_count == 2
+    assert "updating branch" in api.set_status.calls[0]["msg"]
+    assert api.set_status.calls[1]["msg"] == "🛑 cannot merge (rebase conflict)"
+    assert api.set_status.calls[1]["conclusion"] == "failure"
+    assert api.remove_label.calls == [dict(label="automerge")]
+    assert api.create_comment.call_count == 1
+    assert "rebase conflict" in api.create_comment.calls[0]["body"]
+    assert "re-add the `automerge` label" in api.create_comment.calls[0]["body"]
+    assert api.queue_for_merge.called is False
+    assert api.merge.called is False
+
+
+async def test_mergeable_update_branch_rebase_conflict_no_notify_on_conflict() -> None:
+    """
+    Without merge.notify_on_conflict we should not comment, but we should
+    still remove the automerge label. A PR that keeps its label enters the
+    merge queue again and again, because only the update call finds a rebase
+    conflict.
+    """
+    mergeable = create_mergeable()
+    api = create_api()
+    pull_request = create_pull_request()
+    config = create_config()
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+    config.update.always = True
+    config.update.method = UpdateMethod.rebase
+    config.merge.notify_on_conflict = False
+    config.merge.require_automerge_label = True
+    api.update_branch.raises = RebaseConflict
+    await mergeable(api=api, config=config, pull_request=pull_request)
+
+    assert api.update_branch.call_count == 1
+    assert api.dequeue.call_count == 1
+    assert api.set_status.calls[-1]["msg"] == "🛑 cannot merge (rebase conflict)"
+    assert api.remove_label.calls == [dict(label="automerge")]
+    assert api.create_comment.called is False
+    assert api.queue_for_merge.called is False
+    assert api.merge.called is False
+
+
+async def test_mergeable_update_branch_rebase_conflict_no_require_automerge_label() -> (
+    None
+):
+    """
+    If merge.require_automerge_label is off, the label does not control the
+    merge, so we should not remove it. We should not comment, to prevent a
+    new comment on each evaluation.
+    """
+    mergeable = create_mergeable()
+    api = create_api()
+    pull_request = create_pull_request()
+    config = create_config()
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+    config.update.always = True
+    config.update.method = UpdateMethod.rebase
+    config.merge.notify_on_conflict = True
+    config.merge.require_automerge_label = False
+    api.update_branch.raises = RebaseConflict
+    await mergeable(api=api, config=config, pull_request=pull_request)
+
+    assert api.update_branch.call_count == 1
+    assert api.dequeue.call_count == 1
+    assert api.set_status.calls[-1]["msg"] == "🛑 cannot merge (rebase conflict)"
+    assert api.remove_label.called is False
+    assert api.create_comment.called is False
+
+
+async def test_mergeable_update_branch_rebase_conflict_automerge_labels() -> None:
+    """
+    We should remove each automerge label that the PR has.
+    """
+    mergeable = create_mergeable()
+    api = create_api()
+    pull_request = create_pull_request()
+    config = create_config()
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+    pull_request.labels = ["ship it!!!", "automerge", "bugfix"]
+    config.update.always = True
+    config.update.method = UpdateMethod.rebase
+    config.merge.automerge_label = ["ship it!!!", "automerge", "queue"]
+    api.update_branch.raises = RebaseConflict
+    await mergeable(api=api, config=config, pull_request=pull_request)
+
+    assert sorted(call["label"] for call in api.remove_label.calls) == [
+        "automerge",
+        "ship it!!!",
+    ]
+    assert api.create_comment.call_count == 1
+
+
+async def test_mergeable_update_branch_rebase_conflict_missing_label() -> None:
+    """
+    Without `update.require_automerge_label`, `update.always` updates PRs that
+    have no automerge label. There is no label to remove, so we should not
+    comment. This prevents a new comment on each evaluation.
+    """
+    mergeable = create_mergeable()
+    api = create_api()
+    pull_request = create_pull_request()
+    config = create_config()
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+    pull_request.labels = ["bugfix"]
+    config.update.always = True
+    config.update.require_automerge_label = False
+    config.update.method = UpdateMethod.rebase
+    api.update_branch.raises = RebaseConflict
+    await mergeable(api=api, config=config, pull_request=pull_request)
+
+    assert api.update_branch.call_count == 1
+    assert api.dequeue.call_count == 1
+    assert api.set_status.calls[-1]["msg"] == "🛑 cannot merge (rebase conflict)"
+    assert api.remove_label.called is False
+    assert api.create_comment.called is False
+
+
+@pytest.mark.parametrize("optimistic_updates", [True, False])
+async def test_mergeable_update_branch_rebase_conflict_while_merging(
+    optimistic_updates: bool,
+) -> None:
+    """
+    When the update that we make during the merge process hits a rebase
+    conflict, we should block the PR and not raise PollForever, so the merge
+    queue moves on to the next PR.
+    """
+    mergeable = create_mergeable()
+    api = create_api()
+    pull_request = create_pull_request()
+    config = create_config()
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+    config.update.method = UpdateMethod.rebase
+    config.merge.optimistic_updates = optimistic_updates
+    api.update_branch.raises = RebaseConflict
+    await mergeable(api=api, config=config, pull_request=pull_request, merging=True)
+
+    assert api.update_branch.call_count == 1
+    assert api.dequeue.call_count == 1
+    assert api.set_status.calls[-1]["msg"] == "🛑 cannot merge (rebase conflict)"
+    assert api.remove_label.calls == [dict(label="automerge")]
+    assert api.create_comment.call_count == 1
+    assert api.merge.called is False
+
+
+@pytest.mark.parametrize("merging", [True, False])
+async def test_mergeable_update_branch_rebase_conflict_update_branch_immediately(
+    merging: bool,
+) -> None:
+    """
+    The `merge.update_branch_immediately` update should handle a rebase
+    conflict in the same way.
+    """
+    mergeable = create_mergeable()
+    api = create_api()
+    pull_request = create_pull_request()
+    config = create_config()
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+    config.update.method = UpdateMethod.rebase
+    config.merge.update_branch_immediately = True
+    api.update_branch.raises = RebaseConflict
+    await mergeable(api=api, config=config, pull_request=pull_request, merging=merging)
+
+    assert api.update_branch.call_count == 1
+    assert api.dequeue.call_count == 1
+    assert api.set_status.calls[-1]["msg"] == "🛑 cannot merge (rebase conflict)"
+    assert api.remove_label.calls == [dict(label="automerge")]
+    assert api.create_comment.call_count == 1
+    assert api.queue_for_merge.called is False
+    assert api.merge.called is False
+
+
+async def test_mergeable_update_branch_api_call_exception() -> None:
+    """
+    All other update errors should reach the retry handling of the caller.
+    """
+    mergeable = create_mergeable()
+    api = create_api()
+    pull_request = create_pull_request()
+    config = create_config()
+    pull_request.mergeStateStatus = MergeStateStatus.BEHIND
+    config.update.always = True
+    config.update.method = UpdateMethod.rebase
+    api.update_branch.raises = ApiCallException(
+        method="pull_request/update_branch", http_status_code=0, response=b""
+    )
+    with pytest.raises(ApiCallException):
+        await mergeable(api=api, config=config, pull_request=pull_request)
+
+    assert api.update_branch.call_count == 1
+    assert api.dequeue.called is False
+    assert api.remove_label.called is False
+    assert api.create_comment.called is False
 
 
 async def test_mergeable_api_call_retry_timeout() -> None:

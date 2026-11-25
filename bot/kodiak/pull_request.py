@@ -16,6 +16,7 @@ from kodiak.errors import (
     GitHubApiInternalServerError,
     MergeFailed,
     PollForever,
+    RebaseConflict,
     RetryForSkippableChecks,
 )
 from kodiak.evaluation import mergeable
@@ -40,6 +41,8 @@ MERGE_POLL_RATE_SECONDS = 2
 # before it and let the retry pick the merge up again. GitHub answers the retry
 # with a 409 naming the merge that is still running.
 MERGE_POLL_TIMEOUT_SECONDS = 30
+
+REBASE_CONFLICT_ERROR_MESSAGE = "PullRequest::RebaseConflictError"
 
 # status codes of merge-async responses whose body is a merge result.
 MERGE_RESULT_STATUS_CODES = frozenset(
@@ -385,6 +388,11 @@ class PRV2:
                 self.log.warning(
                     "failed to update branch via rebase", res=res, errors=errors
                 )
+                if any(
+                    error.get("message") == REBASE_CONFLICT_ERROR_MESSAGE
+                    for error in errors or []
+                ):
+                    raise RebaseConflict
                 # we raise an exception to retry this request.
                 raise ApiCallException(
                     method="pull_request/update_branch",

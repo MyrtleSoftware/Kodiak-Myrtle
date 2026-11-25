@@ -106,7 +106,7 @@ class Merge(BaseModel):
     # block merging while the pull request's branch contains merge commits
     # (commits with two parents), e.g. from merging the base branch into it.
     block_on_merge_commits: bool = False
-    # comment on merge conflict and remove automerge label
+    # comment on merge conflict or rebase conflict and remove automerge label
     notify_on_conflict: bool = True
     # don't wait for status checks to run before updating branch
     optimistic_updates: bool = True

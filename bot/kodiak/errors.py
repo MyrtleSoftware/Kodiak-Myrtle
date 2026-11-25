@@ -17,6 +17,14 @@ class GitHubApiInternalServerError(Exception):
     pass
 
 
+class RebaseConflict(Exception):
+    """
+    GitHub could not rebase the pull request onto its base branch because the
+    commits conflict. A retry gives the same answer, so this is not an
+    ApiCallException.
+    """
+
+
 class MergeFailed(Exception):
     """
     GitHub ran the merge in the background and reported that it failed, so

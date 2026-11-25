@@ -259,6 +259,15 @@ If you request review from a user, don't merge until that user provides a review
 If there is a merge conflict, make a comment on the PR and remove the
 automerge label.
 
+This also applies to a rebase conflict. With `update.method = "rebase"`, GitHub
+can fail to rebase a pull request that has no merge conflict. Kodiak then sets
+the status `cannot merge (rebase conflict)`.
+
+For a rebase conflict, this option only controls the comment. Kodiak always
+removes the automerge label, because a pull request that keeps the label enters
+the merge queue again, where the update fails again. Add the label again to
+make Kodiak try the update again.
+
 This option only applies when `merge.require_automerge_label` is enabled.
 
 ### `merge.optimistic_updates`
@@ -709,8 +718,10 @@ delete_branch_on_merge = false # default: false
 block_on_reviews_requested = false # default: false
 
 # If there is a merge conflict, make a comment on the PR and remove the
-# automerge label. This option only applies when `merge.require_automerge_label`
-# is enabled.
+# automerge label. This also applies to a rebase conflict when
+# `update.method = "rebase"` is configured, but Kodiak then removes the
+# automerge label without this option too. This option only applies when
+# `merge.require_automerge_label` is enabled.
 notify_on_conflict = true # default: true
 
 # Don't wait for in-progress status checks on a PR to finish before updating the

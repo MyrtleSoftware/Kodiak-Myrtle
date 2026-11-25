@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import (
     Any,
     Awaitable,
@@ -9,6 +10,7 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Tuple,
     Type,
     cast,
 )
@@ -19,7 +21,12 @@ from typing_extensions import Protocol
 import kodiak.http as requests
 from kodiak import pull_request
 from kodiak.config import V1, Merge, MergeMethod, UpdateMethod
-from kodiak.errors import ApiCallException, GitHubApiInternalServerError, MergeFailed
+from kodiak.errors import (
+    ApiCallException,
+    GitHubApiInternalServerError,
+    MergeFailed,
+    RebaseConflict,
+)
 from kodiak.http import Request
 from kodiak.pull_request import PRV2, EventInfoResponse, QueueForMergeCallback
 from kodiak.queries import (
@@ -218,6 +225,35 @@ class MockUpdateRef(BaseMockFunc):
         return self.response
 
 
+class MockCreateNotification(BaseMockFunc):
+    response: requests.Response
+
+    async def __call__(
+        self,
+        head_sha: str,
+        message: str,
+        summary: Optional[str] = None,
+        conclusion: str = "neutral",
+    ) -> requests.Response:
+        self.log_call(
+            dict(
+                head_sha=head_sha,
+                message=message,
+                summary=summary,
+                conclusion=conclusion,
+            )
+        )
+        return self.response
+
+
+class MockCreateComment(BaseMockFunc):
+    response: requests.Response
+
+    async def __call__(self, body: str, pull_number: int) -> requests.Response:
+        self.log_call(dict(body=body, pull_number=pull_number))
+        return self.response
+
+
 class FakeClientProtocol(Protocol):
     merge_pull_request: MockMergePullRequest
     get_merge_result: MockGetMergeResult
@@ -227,6 +263,8 @@ class FakeClientProtocol(Protocol):
     update_branch: MockUpdateBranch
     update_pull_request_branch: MockUpdatePullRequestBranch
     update_ref: MockUpdateRef
+    create_notification: MockCreateNotification
+    create_comment: MockCreateComment
 
     def __init__(self, *args: object, **kwargs: object) -> None: ...
 
@@ -247,6 +285,8 @@ def create_client() -> Type[FakeClientProtocol]:
         update_branch = MockUpdateBranch()
         update_pull_request_branch = MockUpdatePullRequestBranch()
         update_ref = MockUpdateRef()
+        create_notification = MockCreateNotification()
+        create_comment = MockCreateComment()
 
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
@@ -289,6 +329,26 @@ def create_prv2(
         queue_for_merge_callback=queue_for_merge_callback,
         requeue_callback=requeue_callback,
         client=cast(Type[Client], client if client is not None else create_client()),
+    )
+
+
+def rebase_conflict_response() -> Dict[str, Any]:
+    """
+    The answer that GitHub gave to updatePullRequestBranch for a pull request
+    whose commits conflict with the base branch in a rebase.
+    """
+    return cast(
+        Dict[str, Any],
+        json.loads(
+            (
+                Path(__file__).parent
+                / "test"
+                / "fixtures"
+                / "api"
+                / "update_pull_request_branch"
+                / "rebase_conflict.json"
+            ).read_text()
+        ),
     )
 
 
@@ -752,6 +812,199 @@ async def test_pr_v2_update_branch_rebase_request_error() -> None:
     assert client.update_branch.called is False
     assert client.update_pull_request_branch.call_count == 1
     assert e.value.method == "pull_request/update_branch"
+
+
+async def test_pr_v2_update_branch_rebase_conflict() -> None:
+    """
+    We should raise RebaseConflict, not ApiCallException, when GitHub cannot
+    rebase the pull request because of a conflict. A retry gives the same
+    answer.
+    """
+    client = create_client()
+    client.update_pull_request_branch.response = rebase_conflict_response()
+    pr_v2 = create_prv2(client=client)
+    with pytest.raises(RebaseConflict):
+        await pr_v2.update_branch(update_method=UpdateMethod.rebase)
+    assert client.update_branch.called is False
+    assert client.update_pull_request_branch.call_count == 1
+
+
+async def test_pr_v2_update_branch_rebase_unprocessable_other_message() -> None:
+    """
+    We should only handle the rebase conflict message as a rebase conflict.
+    Other UNPROCESSABLE errors keep the retry handling.
+    """
+    client = create_client()
+    response = rebase_conflict_response()
+    response["errors"][0]["message"] = "PullRequest::SomeOtherError"
+    client.update_pull_request_branch.response = response
+    pr_v2 = create_prv2(client=client)
+    with pytest.raises(ApiCallException) as e:
+        await pr_v2.update_branch(update_method=UpdateMethod.rebase)
+    assert client.update_pull_request_branch.call_count == 1
+    assert e.value.method == "pull_request/update_branch"
+    assert b"PullRequest::SomeOtherError" in e.value.response
+
+
+class MockDequeue(BaseMockFunc):
+    async def __call__(self) -> None:
+        self.log_call(dict())
+
+
+class MockQueueForMerge(BaseMockFunc):
+    async def __call__(self, *, first: bool) -> Optional[int]:
+        self.log_call(dict(first=first))
+        return 0
+
+
+def create_rebase_update_client(
+    response: Optional[Dict[str, Any]],
+) -> Type[FakeClientProtocol]:
+    """
+    A client for evaluate_rebase_update(). `response` is the answer of GitHub
+    to the rebase update.
+    """
+    client = create_client()
+    client.update_pull_request_branch.response = response
+    client.create_notification.response = create_response(b"", status_code=201)
+    client.create_comment.response = create_response(b"", status_code=201)
+    client.delete_label.response = create_response(b"", status_code=200)
+    return client
+
+
+def create_rebase_update_event() -> EventInfoResponse:
+    event = create_event()
+    assert isinstance(event.config, V1)
+    event.config.update.method = UpdateMethod.rebase
+    return event
+
+
+async def evaluate_rebase_update(
+    monkeypatch: pytest.MonkeyPatch,
+    client: Type[FakeClientProtocol],
+    event: EventInfoResponse,
+    *,
+    merging: bool,
+) -> Tuple[MockDequeue, MockQueueForMerge]:
+    """
+    Run evaluate_pr() on a pull request that Kodiak must update via rebase
+    before it can merge.
+    """
+    dequeue = MockDequeue()
+    queue_for_merge = MockQueueForMerge()
+
+    async def get_pr(**kwargs: Any) -> PRV2:
+        return create_prv2(
+            event=event,
+            client=client,
+            dequeue_callback=dequeue,
+            queue_for_merge_callback=queue_for_merge,
+        )
+
+    monkeypatch.setattr(pull_request, "get_pr", get_pr)
+    await pull_request.evaluate_pr(
+        install="88443234",
+        owner="delos",
+        repo="incite",
+        number=8634,
+        merging=merging,
+        dequeue_callback=dequeue,
+        requeue_callback=noop,
+        queue_for_merge_callback=queue_for_merge,
+        is_active_merging=False,
+        log=pull_request.logger,
+    )
+    return dequeue, queue_for_merge
+
+
+async def test_evaluate_pr_rebase_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    One evaluation should block the pull request, remove the automerge label
+    and comment, with one update call.
+    """
+    client = create_rebase_update_client(rebase_conflict_response())
+    dequeue, _ = await evaluate_rebase_update(
+        monkeypatch, client, create_rebase_update_event(), merging=True
+    )
+
+    assert client.update_pull_request_branch.call_count == 1
+    assert dequeue.call_count == 1
+    last_status = client.create_notification.calls[-1]
+    assert last_status["message"] == "🛑 cannot merge (rebase conflict)"
+    assert last_status["conclusion"] == "failure"
+    assert [call["label"] for call in client.delete_label.calls] == ["automerge"]
+    assert client.create_comment.call_count == 1
+    assert "rebase conflict" in client.create_comment.calls[0]["body"]
+
+
+async def test_evaluate_pr_rebase_conflict_no_notify_on_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    With `merge.notify_on_conflict` off we should still remove the automerge
+    label, so that the evaluations that follow do not put the pull request in
+    the merge queue again, where the update can only fail again.
+    """
+    client = create_rebase_update_client(rebase_conflict_response())
+    event = create_rebase_update_event()
+    assert isinstance(event.config, V1)
+    event.config.merge.notify_on_conflict = False
+
+    # the merge queue worker finds the conflict.
+    dequeue, _ = await evaluate_rebase_update(monkeypatch, client, event, merging=True)
+    assert client.update_pull_request_branch.call_count == 1
+    assert dequeue.call_count == 1
+    assert [call["label"] for call in client.delete_label.calls] == ["automerge"]
+    assert client.create_comment.called is False
+
+    # a webhook event arrives for the pull request, now without its label.
+    event.pull_request.labels = []
+    dequeue, queue_for_merge = await evaluate_rebase_update(
+        monkeypatch, client, event, merging=False
+    )
+    assert queue_for_merge.called is False
+    assert client.update_pull_request_branch.call_count == 1
+    assert dequeue.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param(
+            {
+                **rebase_conflict_response(),
+                "errors": [
+                    {
+                        **rebase_conflict_response()["errors"][0],
+                        "message": "PullRequest::SomeOtherError",
+                    }
+                ],
+            },
+            id="unprocessable_other_message",
+        ),
+        pytest.param(None, id="empty_answer"),
+    ],
+)
+async def test_evaluate_pr_rebase_other_error_retries(
+    monkeypatch: pytest.MonkeyPatch, response: Optional[Dict[str, Any]]
+) -> None:
+    """
+    Other update errors should keep the retries and the API problem status.
+    """
+    client = create_rebase_update_client(response)
+    dequeue, _ = await evaluate_rebase_update(
+        monkeypatch, client, create_rebase_update_event(), merging=True
+    )
+
+    # one call for each of the 5 available retries.
+    assert client.update_pull_request_branch.call_count == 5
+    assert dequeue.called is False
+    assert (
+        client.create_notification.calls[-1]["message"]
+        == "⚠️ problem contacting GitHub API with method 'pull_request/update_branch'"
+    )
+    assert client.delete_label.called is False
+    assert client.create_comment.called is False
 
 
 async def test_pr_v2_add_label_ok() -> None:
